@@ -19,5 +19,6 @@ type AnalysisContext struct {
 }
 type Detector interface {
 	Metadata() Metadata
+	Requires() []model.Capability
 	Detect(context.Context, *AnalysisContext) ([]model.Finding, error)
 }

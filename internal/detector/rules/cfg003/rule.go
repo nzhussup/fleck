@@ -17,6 +17,10 @@ func (rule) Metadata() detector.Metadata {
 	return detector.Metadata{ID: "CFG003", Name: "Port configuration mismatch", Description: "A Service routes to a different port than the application listens on", Severity: model.SeverityError}
 }
 
+func (rule) Requires() []model.Capability {
+	return []model.Capability{model.CapabilityAppListenPorts, model.CapabilityServicePorts}
+}
+
 func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext) ([]model.Finding, error) {
 	var findings []model.Finding
 	for _, listener := range analysis.Facts.ListenPorts {

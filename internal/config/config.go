@@ -1,105 +1,93 @@
 package config
 
-import (
-	"bytes"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"gopkg.in/yaml.v3"
-)
+import "path/filepath"
 
 type Config struct {
-	Version     int `yaml:"version"`
-	Application struct {
-		Language string `yaml:"language"`
-		Path     string `yaml:"path"`
-	} `yaml:"application"`
-	Deployment struct {
-		Type     string   `yaml:"type"`
-		Chart    string   `yaml:"chart"`
-		Release  string   `yaml:"release"`
-		Values   []string `yaml:"values"`
-		Workload struct {
-			Kind string `yaml:"kind"`
-			Name string `yaml:"name"`
-		} `yaml:"workload"`
-		Container string `yaml:"container"`
-	} `yaml:"deployment"`
-	Dockerfile struct {
-		Path string `yaml:"path"`
-	} `yaml:"dockerfile"`
-	Analysis struct{ Rules []string } `yaml:"analysis"`
-	BaseDir  string                   `yaml:"-"`
+	Version      int                `yaml:"version"`
+	Repositories map[string]string  `yaml:"repositories,omitempty"`
+	Targets      []TargetConfig     `yaml:"targets,omitempty"`
+	Application  *ApplicationConfig `yaml:"application,omitempty"`
+	Deployment   *DeploymentConfig  `yaml:"deployment,omitempty"`
+	Dockerfile   *DockerfileConfig  `yaml:"dockerfile,omitempty"`
+	Analysis     AnalysisConfig     `yaml:"analysis"`
+	BaseDir      string             `yaml:"-"`
 }
 
-func Load(path string) (*Config, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-	b, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
-	}
-	var c Config
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err := dec.Decode(&c); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
-	}
-	c.BaseDir = filepath.Dir(abs)
-	if err := c.Validate(); err != nil {
-		return nil, err
-	}
-	return &c, nil
+// TargetConfig describes one application/deployment consistency boundary.
+// Paths remain relative to the workspace fleck.yaml, so a target can join
+// inputs from multiple checked-out repositories.
+type TargetConfig struct {
+	Name        string             `yaml:"name"`
+	Application *ApplicationConfig `yaml:"application,omitempty"`
+	Deployment  *DeploymentConfig  `yaml:"deployment,omitempty"`
+	Dockerfile  *DockerfileConfig  `yaml:"dockerfile,omitempty"`
+	Analysis    AnalysisConfig     `yaml:"analysis,omitempty"`
 }
 
-func (c *Config) Resolve(p string) string {
-	if filepath.IsAbs(p) {
-		return filepath.Clean(p)
-	}
-	return filepath.Join(c.BaseDir, filepath.Clean(p))
+type ApplicationConfig struct {
+	Repository string `yaml:"repository,omitempty"`
+	Language   string `yaml:"language"`
+	Path       string `yaml:"path"`
 }
 
-func (c *Config) Validate() error {
-	if c.Version != 1 {
-		return fmt.Errorf("invalid fleck.yaml: version must be 1")
+type DeploymentConfig struct {
+	Repository string         `yaml:"repository,omitempty"`
+	Type       string         `yaml:"type"`
+	Chart      string         `yaml:"chart"`
+	Release    string         `yaml:"release"`
+	Values     []string       `yaml:"values"`
+	Manifests  []string       `yaml:"manifests"`
+	Workload   WorkloadConfig `yaml:"workload"`
+	Container  string         `yaml:"container"`
+}
+
+func (c *Config) HasApplication() bool { return c.Application != nil }
+func (c *Config) HasDeployment() bool  { return c.Deployment != nil }
+func (c *Config) HasDockerfile() bool  { return c.Dockerfile != nil }
+
+func (t TargetConfig) HasApplication() bool { return t.Application != nil }
+func (t TargetConfig) HasDeployment() bool  { return t.Deployment != nil }
+func (t TargetConfig) HasDockerfile() bool  { return t.Dockerfile != nil }
+
+func (c *Config) ConfiguredTargets() []TargetConfig {
+	if len(c.Targets) > 0 {
+		return append([]TargetConfig(nil), c.Targets...)
 	}
-	if c.Application.Language != "go" {
-		return fmt.Errorf("invalid fleck.yaml: application.language must be go")
+	name := filepath.Base(c.BaseDir)
+	if c.Deployment != nil && c.Deployment.Workload.Name != "" {
+		name = c.Deployment.Workload.Name
 	}
-	checks := []struct {
-		name, path string
-		dir        bool
-	}{
-		{"application.path", c.Application.Path, true}, {"deployment.chart", c.Deployment.Chart, true}, {"dockerfile.path", c.Dockerfile.Path, false},
+	return []TargetConfig{{Name: name, Application: c.Application, Deployment: c.Deployment, Dockerfile: c.Dockerfile, Analysis: c.Analysis}}
+}
+
+type WorkloadConfig struct {
+	Kind string `yaml:"kind"`
+	Name string `yaml:"name"`
+}
+
+type DockerfileConfig struct {
+	Repository string `yaml:"repository,omitempty"`
+	Path       string `yaml:"path"`
+}
+
+type AnalysisConfig struct {
+	Rules []string `yaml:"rules"`
+}
+
+func (c *Config) Resolve(path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
 	}
-	if c.Deployment.Type != "helm" {
-		return fmt.Errorf("invalid fleck.yaml: deployment.type must be helm")
+	return filepath.Join(c.BaseDir, filepath.Clean(path))
+}
+
+func (c *Config) ResolveIn(repository, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
 	}
-	if c.Deployment.Workload.Kind != "Deployment" {
-		return fmt.Errorf("invalid fleck.yaml: deployment.workload.kind must be Deployment")
+	base := c.BaseDir
+	if repository != "" {
+		base = c.Resolve(c.Repositories[repository])
 	}
-	if c.Deployment.Release == "" || c.Deployment.Workload.Kind == "" || c.Deployment.Workload.Name == "" || c.Deployment.Container == "" {
-		return fmt.Errorf("invalid fleck.yaml: release, workload kind/name, and container are required")
-	}
-	for _, x := range checks {
-		if x.path == "" {
-			return fmt.Errorf("invalid fleck.yaml: %s is required", x.name)
-		}
-		st, err := os.Stat(c.Resolve(x.path))
-		if err != nil {
-			return fmt.Errorf("invalid fleck.yaml: %s %q: %w", x.name, x.path, err)
-		}
-		if x.dir != st.IsDir() {
-			return fmt.Errorf("invalid fleck.yaml: %s has wrong file type", x.name)
-		}
-	}
-	for _, v := range c.Deployment.Values {
-		if st, err := os.Stat(c.Resolve(v)); err != nil || st.IsDir() {
-			return fmt.Errorf("invalid fleck.yaml: deployment.values %q is not a file", v)
-		}
-	}
-	return nil
+	return filepath.Join(base, filepath.Clean(path))
 }

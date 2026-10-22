@@ -10,6 +10,7 @@ import (
 func TestBuildCreatesTypedRelationshipsAndStableDOT(t *testing.T) {
 	f := &model.Facts{
 		ApplicationID: "app",
+		Layers:        model.LayerAvailability{Application: true, Deployment: true},
 		EnvReads:      []model.EnvRead{{ID: "read", Name: "DB", Resolved: true}},
 		Workload:      model.Workload{ID: "workload", Kind: "Deployment", Name: "app"},
 		Container: model.Container{ID: "container", Name: "app", Supplies: []model.EnvSupply{

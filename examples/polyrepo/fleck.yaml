@@ -1,0 +1,46 @@
+version: 1
+
+repositories:
+  application: ./application-repo
+  infrastructure: ./deployment-repo
+
+targets:
+  - name: customer-api-development
+    application:
+      repository: application
+      language: go
+      path: ./cmd/api
+    dockerfile:
+      repository: application
+      path: ./Dockerfile
+    deployment:
+      repository: infrastructure
+      type: kubernetes
+      manifests:
+        - ./clusters/development/customer-api
+      workload:
+        kind: Deployment
+        name: customer-api
+      container: customer-api
+    analysis:
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]
+
+  - name: customer-api-production
+    application:
+      repository: application
+      language: go
+      path: ./cmd/api
+    dockerfile:
+      repository: application
+      path: ./Dockerfile
+    deployment:
+      repository: infrastructure
+      type: kubernetes
+      manifests:
+        - ./clusters/production/customer-api
+      workload:
+        kind: Deployment
+        name: customer-api
+      container: customer-api
+    analysis:
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]

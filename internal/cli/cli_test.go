@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,6 +85,30 @@ func TestGraphAndRulesCommands(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCheckAndTargetSelection(t *testing.T) {
+	workspace := repositoryExample(t, "microservices-monorepo")
+	out := new(bytes.Buffer)
+	root := NewRoot(Dependencies{Service: app.New(), Out: out, Err: out})
+	root.SetArgs([]string{"check", workspace, "--format", "json"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `"targets": [`) || !strings.Contains(got, `"name": "orders"`) || !strings.Contains(got, `"name": "notifications"`) {
+		t.Fatalf("unexpected workspace report: %s", got)
+	}
+
+	out.Reset()
+	root = NewRoot(Dependencies{Service: app.New(), Out: out, Err: out})
+	root.SetArgs([]string{"graph", workspace, "--target", "orders"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "digraph fleck") {
+		t.Fatalf("unexpected graph: %s", out.String())
+	}
+}
+
 func TestHelmFailureIsAnalysisFailure(t *testing.T) {
 	root := NewRoot(Dependencies{Service: &app.Service{Renderer: staticRenderer{fail: true}}, Out: new(bytes.Buffer), Err: new(bytes.Buffer)})
 	root.SetArgs([]string{"check", exampleDir(t)})
@@ -94,9 +119,111 @@ func TestHelmFailureIsAnalysisFailure(t *testing.T) {
 	}
 }
 
+func TestCheckApplicationOnlyReportsUnavailableCrossLayerChecks(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "go.mod", "module example.test/app\n\ngo 1.24\n")
+	writeFixture(t, dir, "main.go", "package main\n\nimport \"os\"\n\nfunc main() { _ = os.Getenv(\"PORT\") }\n")
+	writeFixture(t, dir, "fleck.yaml", "version: 1\napplication: {language: go, path: .}\n")
+
+	out := new(bytes.Buffer)
+	root := NewRoot(Dependencies{Service: &app.Service{Renderer: staticRenderer{fail: true}}, Out: out, Err: out})
+	root.SetArgs([]string{"check", dir})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Application source:     analyzed") || !strings.Contains(got, "Kubernetes deployment:  not provided") {
+		t.Fatalf("layer availability missing:\n%s", got)
+	}
+	for _, id := range []string{"CFG001", "CFG002", "CFG003", "CFG004", "CFG005"} {
+		if !strings.Contains(got, id+" SKIPPED") {
+			t.Errorf("output missing skipped %s:\n%s", id, got)
+		}
+	}
+}
+
+func TestCheckRawKubernetesWithoutApplicationOrDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "fleck.yaml", `version: 1
+deployment:
+  type: kubernetes
+  manifests: [./k8s]
+  workload: {kind: Deployment, name: app}
+  container: app
+`)
+	writeFixture(t, dir, "k8s/resources.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app}
+spec:
+  template:
+    metadata: {labels: {app: demo}}
+    spec:
+      containers:
+        - name: app
+          ports: [{name: http, containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app}
+spec:
+  selector: {app: demo}
+  ports: [{port: 80, targetPort: http}]
+`)
+
+	out := new(bytes.Buffer)
+	root := NewRoot(Dependencies{Service: &app.Service{Renderer: staticRenderer{fail: true}}, Out: out, Err: out})
+	root.SetArgs([]string{"check", dir, "--format", "json"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `"application": false`) || !strings.Contains(got, `"deployment": true`) || !strings.Contains(got, `"dockerfile": false`) {
+		t.Fatalf("unexpected layer report: %s", got)
+	}
+	if !strings.Contains(got, `"ruleId": "CFG001"`) || strings.Contains(got, `"ruleId": "CFG005"`) {
+		t.Fatalf("unexpected skipped checks: %s", got)
+	}
+}
+
+func TestCheckDockerfileOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "fleck.yaml", "version: 1\ndockerfile: {path: ./Dockerfile}\n")
+	writeFixture(t, dir, "Dockerfile", "FROM scratch\nENV PORT=8080\nEXPOSE 8080\n")
+
+	out := new(bytes.Buffer)
+	root := NewRoot(Dependencies{Service: &app.Service{Renderer: staticRenderer{fail: true}}, Out: out, Err: out})
+	root.SetArgs([]string{"check", dir})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Dockerfile:             analyzed") || !strings.Contains(out.String(), "Skipped:  5") {
+		t.Fatalf("unexpected output:\n%s", out.String())
+	}
+}
+
+func writeFixture(t *testing.T, root, relative, contents string) {
+	t.Helper()
+	path := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func exampleDir(t *testing.T) string {
 	t.Helper()
 	p, err := filepath.Abs(filepath.Join("..", "..", "examples", "payment-service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func repositoryExample(t *testing.T, name string) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("..", "..", "examples", name))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 func newCheck(d Dependencies) *cobra.Command {
-	var configPath, format, output, rules, severity, failOn string
+	var configPath, targetName, format, output, rules, severity, failOn string
 	var values []string
 	cmd := &cobra.Command{Use: "check [repository]", Short: "Analyze a configured project", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		target := "."
@@ -39,16 +39,26 @@ func newCheck(d Dependencies) *cobra.Command {
 		if cmd.Flags().Changed("values") {
 			overrides = values
 		}
-		result, err := d.Service.Analyze(cmd.Context(), target, app.Options{ConfigPath: configPath, Values: overrides, Rules: selected})
+		results, err := d.Service.AnalyzeAll(cmd.Context(), target, app.Options{ConfigPath: configPath, Target: targetName, Values: overrides, Rules: selected})
 		if err != nil {
 			return &ExitError{Code: 2, Err: err}
 		}
-		filtered := filterFindings(result.Findings, min)
+		inputs := make([]report.Input, 0, len(results))
+		for _, result := range results {
+			inputs = append(inputs, report.Input{Name: result.Name, Facts: result.Facts, Findings: filterFindings(result.Findings, min), Skipped: result.Skipped, Timings: result.Timings})
+		}
 		var b bytes.Buffer
-		if format == "json" {
-			err = report.JSON(&b, Version, result.Facts, filtered, result.Timings)
+		singleTargetReport := len(inputs) == 1 && (targetName != "" || len(results[0].Config.Targets) == 0)
+		if singleTargetReport {
+			if format == "json" {
+				err = report.JSON(&b, Version, inputs[0].Facts, inputs[0].Findings, inputs[0].Skipped, inputs[0].Timings)
+			} else {
+				err = report.Text(&b, inputs[0].Facts, inputs[0].Findings, inputs[0].Skipped)
+			}
+		} else if format == "json" {
+			err = report.JSONWorkspace(&b, Version, inputs)
 		} else {
-			err = report.Text(&b, result.Facts, filtered)
+			err = report.TextWorkspace(&b, inputs)
 		}
 		if err != nil {
 			return err
@@ -63,18 +73,21 @@ func newCheck(d Dependencies) *cobra.Command {
 				return err
 			}
 		}
-		for _, f := range result.Findings {
-			if model.SeverityRank(f.Severity) >= model.SeverityRank(fail) {
-				return &ExitError{Code: 1, Err: fmt.Errorf("findings met fail threshold %s", failOn)}
+		for _, result := range results {
+			for _, f := range result.Findings {
+				if model.SeverityRank(f.Severity) >= model.SeverityRank(fail) {
+					return &ExitError{Code: 1, Err: fmt.Errorf("findings met fail threshold %s", failOn)}
+				}
 			}
 		}
 		return nil
 	}}
 	cmd.Flags().StringVar(&configPath, "config", "", "explicit fleck.yaml path")
+	cmd.Flags().StringVar(&targetName, "target", "", "analyze one named workspace target")
 	cmd.Flags().StringSliceVar(&values, "values", nil, "Helm values overlays (replaces configured overlays)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write report to a file")
-	cmd.Flags().StringVar(&rules, "rules", "", "comma-separated enabled rule IDs")
+	cmd.Flags().StringVar(&rules, "rules", "", "override enabled rule IDs for selected targets")
 	cmd.Flags().StringVar(&severity, "severity", "info", "minimum reported severity")
 	cmd.Flags().StringVar(&failOn, "fail-on", "error", "minimum severity that returns exit status 1")
 	return cmd

@@ -16,6 +16,10 @@ func (rule) Metadata() detector.Metadata {
 	return detector.Metadata{ID: "CFG001", Name: "Missing required environment variable", Description: "Required variable is definitely not supplied to the selected container", Severity: model.SeverityError}
 }
 
+func (rule) Requires() []model.Capability {
+	return []model.Capability{model.CapabilityEnvReads, model.CapabilityDeploymentEnv}
+}
+
 func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext) ([]model.Finding, error) {
 	var findings []model.Finding
 	for _, read := range analysis.Queries.EnvironmentReads() {

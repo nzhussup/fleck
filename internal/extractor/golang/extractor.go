@@ -7,6 +7,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -33,20 +34,19 @@ type valueExpr struct {
 
 func Extract(ctx context.Context, root, applicationPath, applicationID string) (Result, error) {
 	fset := token.NewFileSet()
-	cfg := &packages.Config{Context: ctx, Dir: root, Fset: fset, Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps}
-	rel, err := filepath.Rel(root, applicationPath)
-	if err != nil {
-		return Result{}, fmt.Errorf("resolve Go application path: %w", err)
-	}
-	pattern := "./" + filepath.ToSlash(rel)
-	pkgs, err := packages.Load(cfg, pattern)
+	cfg := &packages.Config{Context: ctx, Dir: applicationPath, Fset: fset, Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps}
+	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
 		return Result{}, fmt.Errorf("load Go packages: %w", err)
 	}
 	if n := packages.PrintErrors(pkgs); n > 0 {
 		return Result{}, fmt.Errorf("load Go packages: %d package errors", n)
 	}
-	rootAbs, _ := filepath.Abs(root)
+	sourceRoot := nearestModuleRoot(applicationPath)
+	if sourceRoot == "" {
+		sourceRoot = root
+	}
+	rootAbs, _ := filepath.Abs(sourceRoot)
 	var out Result
 	seenFiles := map[string]bool{}
 	var visit func(*packages.Package)
@@ -70,6 +70,23 @@ func Extract(ctx context.Context, root, applicationPath, applicationID string) (
 	sort.Slice(out.EnvReads, func(i, j int) bool { return out.EnvReads[i].ID < out.EnvReads[j].ID })
 	sort.Slice(out.ListenPorts, func(i, j int) bool { return out.ListenPorts[i].ID < out.ListenPorts[j].ID })
 	return out, nil
+}
+
+func nearestModuleRoot(start string) string {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		if info, statErr := os.Stat(filepath.Join(current, "go.mod")); statErr == nil && !info.IsDir() {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
 }
 
 func within(root, path string) bool {

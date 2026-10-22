@@ -1,0 +1,27 @@
+version: 1
+
+targets:
+  - name: orders
+    application:
+      language: go
+      path: ./services/orders/cmd/api
+    deployment:
+      type: kubernetes
+      manifests: [./services/orders/deploy/k8s]
+      workload:
+        kind: Deployment
+        name: orders
+      container: orders
+    dockerfile:
+      path: ./services/orders/Dockerfile
+    analysis:
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]
+
+  - name: notifications
+    application:
+      language: go
+      path: ./services/notifications/cmd/worker
+    dockerfile:
+      path: ./services/notifications/Dockerfile
+    analysis:
+      rules: [CFG002, CFG004]

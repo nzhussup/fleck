@@ -13,7 +13,7 @@ import (
 
 func TestAllRulesAgainstSharedFacts(t *testing.T) {
 	analysis := analysisContext(fixtureFacts())
-	want := map[string]int{"CFG001": 1, "CFG002": 1, "CFG003": 1, "CFG004": 2}
+	want := map[string]int{"CFG001": 1, "CFG002": 1, "CFG003": 1, "CFG004": 2, "CFG005": 0}
 	for _, rule := range registry.All() {
 		findings, err := rule.Detect(context.Background(), analysis)
 		if err != nil {
@@ -33,8 +33,8 @@ func TestMetadataUsesUniqueStableIDs(t *testing.T) {
 		}
 		seen[metadata.ID] = true
 	}
-	if len(seen) != 4 {
-		t.Fatalf("registered %d rules, want 4", len(seen))
+	if len(seen) != 5 {
+		t.Fatalf("registered %d rules, want 5", len(seen))
 	}
 }
 

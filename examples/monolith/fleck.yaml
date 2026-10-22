@@ -1,0 +1,17 @@
+version: 1
+
+targets:
+  - name: inventory-monolith
+    application:
+      language: go
+      path: ./cmd/web
+    deployment:
+      type: kubernetes
+      manifests:
+        - ./deploy/k8s
+      workload:
+        kind: Deployment
+        name: inventory-monolith
+      container: inventory-monolith
+    analysis:
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]

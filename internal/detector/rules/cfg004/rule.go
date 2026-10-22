@@ -16,6 +16,10 @@ func (rule) Metadata() detector.Metadata {
 	return detector.Metadata{ID: "CFG004", Name: "Potentially unused environment variable", Description: "A supplied variable has no recognized application read", Severity: model.SeverityInfo}
 }
 
+func (rule) Requires() []model.Capability {
+	return []model.Capability{model.CapabilityEnvReads, model.CapabilityEnvSupplies}
+}
+
 func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext) ([]model.Finding, error) {
 	reads := map[string]bool{}
 	for _, read := range analysis.Queries.EnvironmentReads() {

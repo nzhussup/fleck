@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-api
+  namespace: customer-facing
+spec:
+  selector:
+    matchLabels:
+      app: customer-api
+  template:
+    metadata:
+      labels:
+        app: customer-api
+    spec:
+      containers:
+        - name: customer-api
+          image: registry.example/customer-api:1.4.0
+          env:
+            - name: REDIS_ADDRESS
+              valueFrom:
+                secretKeyRef:
+                  name: customer-api-runtime
+                  key: redis-address
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-api
+  namespace: customer-facing
+spec:
+  selector:
+    app: customer-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

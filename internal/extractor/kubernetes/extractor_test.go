@@ -79,4 +79,47 @@ spec: {template: {metadata: {labels: {app: x}}, spec: {containers: [{name: app, 
 	if len(r.Container.Supplies) != 1 || r.Container.Supplies[0].State != model.SupplyUnverified || r.Container.Supplies[0].Name != "" {
 		t.Fatalf("unexpected unresolved supply: %#v", r.Container.Supplies)
 	}
+	if len(r.Diagnostics) != 1 || r.Diagnostics[0].Level != "warning" {
+		t.Fatalf("missing incomplete-manifest diagnostic: %#v", r.Diagnostics)
+	}
+}
+
+func TestReportsUnresolvedNamedTargetPort(t *testing.T) {
+	m := `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app}
+spec: {template: {metadata: {labels: {app: x}}, spec: {containers: [{name: app, ports: [{name: http, containerPort: 8080}]}]}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app}
+spec: {selector: {app: x}, ports: [{port: 80, targetPort: missing}]}
+`
+	r, err := Extract([]byte(m), "Deployment", "app", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Diagnostics) != 1 || r.Diagnostics[0].Level != "error" {
+		t.Fatalf("diagnostics=%#v, want unresolved named-port error", r.Diagnostics)
+	}
+}
+
+func TestReportsSelectorWithNoRepresentedWorkloadAsUncertain(t *testing.T) {
+	m := `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app}
+spec: {template: {metadata: {labels: {app: x}}, spec: {containers: [{name: app}]}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: orphan}
+spec: {selector: {app: absent}, ports: [{port: 80}]}
+`
+	r, err := Extract([]byte(m), "Deployment", "app", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Diagnostics) != 1 || r.Diagnostics[0].Level != "warning" {
+		t.Fatalf("diagnostics=%#v, want incomplete-set warning", r.Diagnostics)
+	}
 }

@@ -20,15 +20,16 @@ call graph or assume that every caller propagates failure to initialization.
 
 ## Kubernetes and Helm
 
-Helm is rendered once with `helm template`. Supported Kubernetes inputs are
-Deployments, Services, ConfigMaps, and Secrets. Fleck selects the exact workload
-and container named by `fleck.yaml`.
+Helm charts are rendered once with `helm template`; raw YAML files or directories
+can be configured instead. Supported Kubernetes inputs are Deployments,
+Services, ConfigMaps, and Secrets. Fleck selects the exact workload and container
+named by `fleck.yaml`.
 
 Supported environment forms are literal `env`, ConfigMap/Secret key references,
 and prefixed `envFrom`. Resolution is namespace-aware and preserves optional,
 missing, and unverified references. Service selectors match Pod-template labels;
-numeric and named `targetPort` values are supported. Named ports resolve only
-against the selected container with a matching protocol.
+numeric and named `targetPort` values are supported. Named ports resolve against
+all containers in the selected Pod template with a matching protocol.
 
 ## Dockerfile
 

@@ -22,25 +22,38 @@ import (
 type Service struct{ Renderer helm.Renderer }
 type Options struct {
 	ConfigPath    string
+	Target        string
 	Values        []string
 	Rules         []string
 	SkipDetection bool
 }
 type Result struct {
+	Name     string
 	Config   *config.Config
 	Facts    *model.Facts
 	Graph    *graph.Graph
 	Findings []model.Finding
+	Skipped  []model.SkippedCheck
 	Timings  model.Timings
 }
 
 func New() *Service { return &Service{Renderer: helm.CommandRenderer{}} }
 
 func (s *Service) Analyze(ctx context.Context, target string, o Options) (Result, error) {
-	total := time.Now()
-	absTarget, err := filepath.Abs(target)
+	results, err := s.AnalyzeAll(ctx, target, o)
 	if err != nil {
 		return Result{}, err
+	}
+	if len(results) != 1 {
+		return Result{}, fmt.Errorf("configuration contains %d targets; select one with --target", len(results))
+	}
+	return results[0], nil
+}
+
+func (s *Service) AnalyzeAll(ctx context.Context, repository string, o Options) ([]Result, error) {
+	absTarget, err := filepath.Abs(repository)
+	if err != nil {
+		return nil, err
 	}
 	configPath := o.ConfigPath
 	if configPath == "" {
@@ -50,71 +63,122 @@ func (s *Service) Analyze(ctx context.Context, target string, o Options) (Result
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
-	rulesToValidate := cfg.Analysis.Rules
+	targets := cfg.ConfiguredTargets()
+	if o.Target != "" {
+		selected := targets[:0]
+		for _, configured := range targets {
+			if configured.Name == o.Target {
+				selected = append(selected, configured)
+			}
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("target %q is not configured", o.Target)
+		}
+		targets = selected
+	}
+	if o.Values != nil && len(targets) != 1 {
+		return nil, fmt.Errorf("--values requires selecting exactly one target with --target")
+	}
+	results := make([]Result, 0, len(targets))
+	for _, configured := range targets {
+		result, analyzeErr := s.analyzeTarget(ctx, absTarget, cfg, configured, o)
+		if analyzeErr != nil {
+			return nil, fmt.Errorf("target %s: %w", configured.Name, analyzeErr)
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func (s *Service) analyzeTarget(ctx context.Context, repository string, cfg *config.Config, target config.TargetConfig, o Options) (Result, error) {
+	total := time.Now()
+	rules := target.Analysis.Rules
 	if o.Rules != nil {
-		rulesToValidate = o.Rules
+		rules = o.Rules
 	}
-	if err := ValidateRules(rulesToValidate); err != nil {
+	if err := ValidateRules(rules); err != nil {
 		return Result{}, fmt.Errorf("invalid analysis rules: %w", err)
 	}
-	values := cfg.Deployment.Values
-	if o.Values != nil {
-		values = o.Values
+	absValues, err := effectiveValues(cfg, target, repository, o.Values)
+	if err != nil {
+		return Result{}, err
 	}
-	absValues := make([]string, len(values))
-	for i, v := range values {
-		absValues[i] = cfg.Resolve(v)
-		if o.Values != nil && !filepath.IsAbs(v) {
-			absValues[i] = filepath.Join(absTarget, v)
+	if err := cfg.ValidateTargetPaths(target, absValues); err != nil {
+		return Result{}, err
+	}
+	facts := &model.Facts{
+		ApplicationID: target.Name,
+		Capabilities:  model.CapabilitySet{},
+		Layers:        model.LayerAvailability{Application: target.HasApplication(), Deployment: target.HasDeployment(), Dockerfile: target.HasDockerfile()},
+	}
+	timings := model.Timings{}
+
+	if target.HasApplication() {
+		facts.ApplicationPath = target.Application.Path
+		start := time.Now()
+		goFacts, extractErr := goextract.Extract(ctx, cfg.BaseDir, cfg.ResolveIn(target.Application.Repository, target.Application.Path), facts.ApplicationID)
+		timings.GoExtraction = time.Since(start)
+		if extractErr != nil {
+			return Result{}, extractErr
 		}
+		facts.EnvReads, facts.ListenPorts = goFacts.EnvReads, goFacts.ListenPorts
+		facts.Capabilities[model.CapabilityEnvReads] = true
+		facts.Capabilities[model.CapabilityAppListenPorts] = true
 	}
-	start := time.Now()
-	goFacts, err := goextract.Extract(ctx, cfg.BaseDir, cfg.Resolve(cfg.Application.Path), cfg.Deployment.Workload.Name)
-	if err != nil {
-		return Result{}, err
+
+	if target.HasDeployment() {
+		manifest, renderDuration, renderErr := s.deploymentManifest(ctx, cfg, target, absValues)
+		timings.HelmRendering = renderDuration
+		if renderErr != nil {
+			return Result{}, renderErr
+		}
+		start := time.Now()
+		kube, extractErr := kubeextract.Extract(manifest, target.Deployment.Workload.Kind, target.Deployment.Workload.Name, target.Deployment.Container)
+		timings.KubernetesExtraction = time.Since(start)
+		if extractErr != nil {
+			return Result{}, extractErr
+		}
+		facts.Workload, facts.Container, facts.Services, facts.Diagnostics = kube.Workload, kube.Container, kube.Services, kube.Diagnostics
+		facts.Capabilities[model.CapabilityDeploymentEnv] = true
+		facts.Capabilities[model.CapabilityEnvSupplies] = true
+		facts.Capabilities[model.CapabilityContainerPorts] = true
+		facts.Capabilities[model.CapabilityServicePorts] = true
 	}
-	goDuration := time.Since(start)
-	renderer := s.Renderer
-	if renderer == nil {
-		renderer = helm.CommandRenderer{}
+
+	if target.HasDockerfile() {
+		containerID := facts.Container.ID
+		if containerID == "" {
+			containerID = "container:image"
+			facts.Container = model.Container{ID: containerID, Name: "image"}
+		}
+		start := time.Now()
+		docker, extractErr := dockerextract.Extract(cfg.ResolveIn(target.Dockerfile.Repository, target.Dockerfile.Path), containerID)
+		timings.DockerExtraction = time.Since(start)
+		if extractErr != nil {
+			return Result{}, extractErr
+		}
+		facts.Docker = docker
+		facts.Container.Supplies = effectiveOrder(docker.Environment, facts.Container.Supplies)
+		facts.Capabilities[model.CapabilityDockerEnv] = true
+		facts.Capabilities[model.CapabilityEnvSupplies] = true
+		facts.Capabilities[model.CapabilityDockerPorts] = true
 	}
-	rendered, err := renderer.Render(ctx, cfg.Deployment.Release, cfg.Resolve(cfg.Deployment.Chart), absValues)
-	if err != nil {
-		return Result{}, err
-	}
-	start = time.Now()
-	kube, err := kubeextract.Extract(rendered.Manifest, cfg.Deployment.Workload.Kind, cfg.Deployment.Workload.Name, cfg.Deployment.Container)
-	if err != nil {
-		return Result{}, err
-	}
-	kubeDuration := time.Since(start)
-	start = time.Now()
-	docker, err := dockerextract.Extract(cfg.Resolve(cfg.Dockerfile.Path), kube.Container.ID)
-	if err != nil {
-		return Result{}, err
-	}
-	dockerDuration := time.Since(start)
-	kube.Container.Supplies = effectiveOrder(docker.Environment, kube.Container.Supplies)
-	facts := &model.Facts{ApplicationID: cfg.Deployment.Workload.Name, ApplicationPath: cfg.Application.Path, EnvReads: goFacts.EnvReads, ListenPorts: goFacts.ListenPorts, Workload: kube.Workload, Container: kube.Container, Services: kube.Services, Docker: docker, Diagnostics: kube.Diagnostics}
+
 	resolveListenPorts(facts)
-	start = time.Now()
+	start := time.Now()
 	g := graph.Build(facts)
-	graphDuration := time.Since(start)
-	result := Result{Config: cfg, Facts: facts, Graph: g, Timings: model.Timings{GoExtraction: goDuration, HelmRendering: rendered.Duration, KubernetesExtraction: kubeDuration, DockerExtraction: dockerDuration, GraphConstruction: graphDuration}}
+	timings.GraphConstruction = time.Since(start)
+	result := Result{Name: target.Name, Config: cfg, Facts: facts, Graph: g, Timings: timings}
 	if !o.SkipDetection {
 		enabled := map[string]bool{}
-		rules := cfg.Analysis.Rules
-		if o.Rules != nil {
-			rules = o.Rules
-		}
 		for _, id := range rules {
 			enabled[id] = true
 		}
 		start = time.Now()
 		actx := &detector.AnalysisContext{Facts: facts, Graph: g, Queries: graph.Queries{Facts: facts, Graph: g}}
-		result.Findings, err = detector.Run(ctx, detectorregistry.All(), actx, enabled)
+		result.Findings, result.Skipped, err = detector.Run(ctx, detectorregistry.All(), actx, enabled)
 		result.Timings.Detection = time.Since(start)
 		if err != nil {
 			return Result{}, err
@@ -122,6 +186,44 @@ func (s *Service) Analyze(ctx context.Context, target string, o Options) (Result
 	}
 	result.Timings.Total = time.Since(total)
 	return result, nil
+}
+
+func effectiveValues(cfg *config.Config, configured config.TargetConfig, repository string, overrides []string) ([]string, error) {
+	if !configured.HasDeployment() || configured.Deployment.Type != "helm" {
+		if overrides != nil {
+			return nil, fmt.Errorf("--values requires a Helm deployment")
+		}
+		return nil, nil
+	}
+	values := configured.Deployment.Values
+	if overrides != nil {
+		values = overrides
+	}
+	resolved := make([]string, len(values))
+	for index, value := range values {
+		resolved[index] = cfg.ResolveIn(configured.Deployment.Repository, value)
+		if overrides != nil && !filepath.IsAbs(value) {
+			resolved[index] = filepath.Join(repository, value)
+		}
+	}
+	return resolved, nil
+}
+
+func (s *Service) deploymentManifest(ctx context.Context, cfg *config.Config, target config.TargetConfig, values []string) ([]byte, time.Duration, error) {
+	if target.Deployment.Type == "kubernetes" {
+		paths := make([]string, len(target.Deployment.Manifests))
+		for index, path := range target.Deployment.Manifests {
+			paths[index] = cfg.ResolveIn(target.Deployment.Repository, path)
+		}
+		manifest, err := kubeextract.LoadManifests(ctx, paths)
+		return manifest, 0, err
+	}
+	renderer := s.Renderer
+	if renderer == nil {
+		renderer = helm.CommandRenderer{}
+	}
+	rendered, err := renderer.Render(ctx, target.Deployment.Release, cfg.ResolveIn(target.Deployment.Repository, target.Deployment.Chart), values)
+	return rendered.Manifest, rendered.Duration, err
 }
 
 func effectiveOrder(image, kube []model.EnvSupply) []model.EnvSupply {

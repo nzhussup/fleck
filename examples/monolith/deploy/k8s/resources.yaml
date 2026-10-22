@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-monolith
+data:
+  database-url: postgres://database.example/inventory
+  http-port: "8080"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-monolith
+spec:
+  selector:
+    matchLabels:
+      app: inventory-monolith
+  template:
+    metadata:
+      labels:
+        app: inventory-monolith
+    spec:
+      containers:
+        - name: inventory-monolith
+          image: example/inventory-monolith:local
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: inventory-monolith
+                  key: database-url
+            - name: HTTP_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: inventory-monolith
+                  key: http-port
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-monolith
+spec:
+  selector:
+    app: inventory-monolith
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -9,7 +9,7 @@ import (
 )
 
 func newGraph(d Dependencies) *cobra.Command {
-	var configPath, format, output string
+	var configPath, targetName, format, output string
 	var values []string
 	cmd := &cobra.Command{Use: "graph [repository]", Short: "Export the configuration dependency graph", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validFormat(format, "dot"); err != nil {
@@ -23,11 +23,14 @@ func newGraph(d Dependencies) *cobra.Command {
 		if cmd.Flags().Changed("values") {
 			overrides = values
 		}
-		r, err := d.Service.Analyze(cmd.Context(), target, app.Options{ConfigPath: configPath, Values: overrides, SkipDetection: true})
+		results, err := d.Service.AnalyzeAll(cmd.Context(), target, app.Options{ConfigPath: configPath, Target: targetName, Values: overrides, SkipDetection: true})
 		if err != nil {
 			return &ExitError{Code: 2, Err: err}
 		}
-		data := []byte(r.Graph.DOT())
+		if len(results) != 1 {
+			return &ExitError{Code: 2, Err: fmt.Errorf("configuration contains %d targets; select one with --target", len(results))}
+		}
+		data := []byte(results[0].Graph.DOT())
 		if output != "" {
 			if err = os.WriteFile(output, data, 0o644); err != nil {
 				return fmt.Errorf("write graph: %w", err)
@@ -38,6 +41,7 @@ func newGraph(d Dependencies) *cobra.Command {
 		return err
 	}}
 	cmd.Flags().StringVar(&configPath, "config", "", "explicit fleck.yaml path")
+	cmd.Flags().StringVar(&targetName, "target", "", "export one named workspace target")
 	cmd.Flags().StringSliceVar(&values, "values", nil, "Helm values overlays (replaces configured overlays)")
 	cmd.Flags().StringVar(&format, "format", "dot", "graph format")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write graph to a file")

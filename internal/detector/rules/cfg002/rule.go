@@ -16,12 +16,20 @@ type rule struct{ threshold float64 }
 func New(threshold float64) detector.Detector { return rule{threshold: threshold} }
 
 func (rule) Metadata() detector.Metadata {
-	return detector.Metadata{ID: "CFG002", Name: "Probable environment-variable naming mismatch", Description: "Application and deployment variable names are probably inconsistent", Severity: model.SeverityWarning}
+	return detector.Metadata{ID: "CFG002", Name: "Probable environment-variable naming mismatch", Description: "Application and supplied variable names are probably inconsistent", Severity: model.SeverityWarning}
+}
+
+func (rule) Requires() []model.Capability {
+	return []model.Capability{model.CapabilityEnvReads, model.CapabilityEnvSupplies}
 }
 
 func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext) ([]model.Finding, error) {
 	supplied := map[string]model.EnvSupply{}
+	declared := map[string]bool{}
 	for _, supply := range analysis.Queries.EffectiveSupplies() {
+		if supply.Name != "" && supply.State != model.SupplyMissingMandatory && supply.State != model.SupplyMissingOptional {
+			declared[supply.Name] = true
+		}
 		if supply.Name != "" && supply.State == model.SupplyDefinite {
 			supplied[supply.Name] = supply
 		}
@@ -33,7 +41,7 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 		if !read.Resolved {
 			continue
 		}
-		if _, found := supplied[read.Name]; found {
+		if declared[read.Name] {
 			continue
 		}
 
@@ -48,7 +56,7 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 		findings = append(findings, model.Finding{
 			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
 			Subject:  read.Name,
-			Message:  fmt.Sprintf("Application expects %s, but deployment supplies %s (possible naming mismatch)", read.Name, bestName),
+			Message:  fmt.Sprintf("Application expects %s, but configuration supplies %s (possible naming mismatch)", read.Name, bestName),
 			Location: read.Source, Related: []model.SourceLocation{candidate.Location},
 			Evidence:   []model.Evidence{{Kind: "string-similarity", Description: fmt.Sprintf("normalized similarity %.2f", bestScore)}},
 			Suggestion: "Verify the environment-variable names in source and deployment configuration.",

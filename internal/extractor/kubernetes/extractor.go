@@ -178,10 +178,17 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 		}
 	}
 	for _, d := range docs {
-		if d.Kind != "Service" || d.Metadata.Namespace != chosen.Metadata.Namespace || !selectorMatches(selectorStrings(d.Spec.Selector), w.Labels) {
+		if d.Kind != "Service" || d.Metadata.Namespace != chosen.Metadata.Namespace {
 			continue
 		}
-		s := model.Service{ID: resourceID("Service", d.Metadata.Namespace, d.Metadata.Name), Name: d.Metadata.Name, Namespace: d.Metadata.Namespace, Selector: selectorStrings(d.Spec.Selector)}
+		selector := selectorStrings(d.Spec.Selector)
+		if !selectorMatchesAnyWorkload(docs, d.Metadata.Namespace, selector) {
+			out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: fmt.Sprintf("Service %s selector matches no workload represented in the analyzed manifests; the manifest set may be incomplete", d.Metadata.Name), Location: renderedLoc()})
+		}
+		if !selectorMatches(selector, w.Labels) {
+			continue
+		}
+		s := model.Service{ID: resourceID("Service", d.Metadata.Namespace, d.Metadata.Name), Name: d.Metadata.Name, Namespace: d.Metadata.Namespace, Selector: selector}
 		for _, p := range d.Spec.Ports {
 			sp := model.ServicePort{Name: p.Name, Port: p.Port, Protocol: p.Protocol, Location: renderedLoc()}
 			if sp.Protocol == "" {
@@ -197,12 +204,20 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 					sp.TargetResolved = true
 				} else {
 					sp.TargetPortName = x
-					for _, cp := range out.Container.Ports {
-						if cp.Name == x && strings.EqualFold(cp.Protocol, sp.Protocol) {
-							sp.TargetPort = cp.Port
-							sp.TargetResolved = true
+					for _, workloadContainer := range w.Containers {
+						for _, cp := range workloadContainer.Ports {
+							if cp.Name == x && strings.EqualFold(cp.Protocol, sp.Protocol) {
+								sp.TargetPort = cp.Port
+								sp.TargetResolved = true
+								break
+							}
+						}
+						if sp.TargetResolved {
 							break
 						}
+					}
+					if !sp.TargetResolved {
+						out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "error", Message: fmt.Sprintf("Service %s targetPort %q does not match a port declared by the selected workload", d.Metadata.Name, x), Location: renderedLoc()})
 					}
 				}
 			case nil:
@@ -260,6 +275,7 @@ func resolveFrom(add func(model.EnvSupply), out *Result, resources map[string]do
 	d, ok := resources[ns+"/"+name]
 	if !ok {
 		add(model.EnvSupply{Name: "", State: model.SupplyUnverified, SourceKind: src, Reference: ns + "/" + name, Optional: optional, Sensitive: sensitive, Location: renderedLoc()})
+		out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: "referenced resource cannot be verified: " + ns + "/" + name, Location: renderedLoc()})
 		return
 	}
 	keys := make([]string, 0, len(d.Data)+len(d.StringData))
@@ -294,6 +310,15 @@ func selectorMatches(sel, labels map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func selectorMatchesAnyWorkload(documents []document, namespace string, selector map[string]string) bool {
+	for _, candidate := range documents {
+		if candidate.Kind == "Deployment" && candidate.Metadata.Namespace == namespace && selectorMatches(selector, candidate.Spec.Template.Metadata.Labels) {
+			return true
+		}
+	}
+	return false
 }
 
 func selectorStrings(raw map[string]any) map[string]string {

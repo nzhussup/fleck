@@ -124,15 +124,47 @@ type DockerFacts struct {
 }
 
 type Facts struct {
-	ApplicationID   string       `json:"applicationId"`
-	ApplicationPath string       `json:"applicationPath"`
-	EnvReads        []EnvRead    `json:"envReads"`
-	ListenPorts     []ListenPort `json:"listenPorts"`
-	Workload        Workload     `json:"workload"`
-	Container       Container    `json:"container"`
-	Services        []Service    `json:"services"`
-	Docker          DockerFacts  `json:"docker"`
-	Diagnostics     []Diagnostic `json:"diagnostics,omitempty"`
+	ApplicationID   string            `json:"applicationId,omitempty"`
+	ApplicationPath string            `json:"applicationPath,omitempty"`
+	EnvReads        []EnvRead         `json:"envReads"`
+	ListenPorts     []ListenPort      `json:"listenPorts"`
+	Workload        Workload          `json:"workload"`
+	Container       Container         `json:"container"`
+	Services        []Service         `json:"services"`
+	Docker          DockerFacts       `json:"docker"`
+	Diagnostics     []Diagnostic      `json:"diagnostics,omitempty"`
+	Layers          LayerAvailability `json:"layers"`
+	Capabilities    CapabilitySet     `json:"capabilities"`
+}
+
+type LayerAvailability struct {
+	Application bool `json:"application"`
+	Deployment  bool `json:"deployment"`
+	Dockerfile  bool `json:"dockerfile"`
+}
+
+type Capability string
+
+const (
+	CapabilityEnvReads       Capability = "env_reads"
+	CapabilityEnvSupplies    Capability = "env_supplies"
+	CapabilityDeploymentEnv  Capability = "deployment_env"
+	CapabilityAppListenPorts Capability = "app_listen_ports"
+	CapabilityContainerPorts Capability = "container_ports"
+	CapabilityServicePorts   Capability = "service_ports"
+	CapabilityDockerEnv      Capability = "docker_env"
+	CapabilityDockerPorts    Capability = "docker_ports"
+)
+
+type CapabilitySet map[Capability]bool
+
+func (set CapabilitySet) Has(capability Capability) bool { return set[capability] }
+
+type SkippedCheck struct {
+	RuleID   string       `json:"ruleId"`
+	RuleName string       `json:"ruleName"`
+	Reason   string       `json:"reason"`
+	Missing  []Capability `json:"missingCapabilities"`
 }
 
 type Diagnostic struct {

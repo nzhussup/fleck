@@ -14,7 +14,8 @@
   definitely absent. Secret values are intentionally unavailable for analysis.
 - Dockerfile interpretation is not a build or image inspection. Complex stage
   and variable expansion is unresolved, and `EXPOSE` is metadata only.
-- The MVP analyzes one configured Go application, workload, container,
-  Dockerfile, and Helm rendering. It does not discover multiple services.
+- A workspace may contain many explicit targets, but each target still selects
+  at most one Go application, workload, and primary container. Fleck does not
+  infer application-to-deployment ownership automatically.
 - The naming and unused-variable rules are heuristics and can produce false
   positives. No finding is an automatic-fix instruction.

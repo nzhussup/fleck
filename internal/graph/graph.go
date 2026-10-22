@@ -63,17 +63,29 @@ func (g *Graph) addEdge(from, to string, k EdgeKind) {
 func Build(f *model.Facts) *Graph {
 	g := New()
 	app := "application:" + f.ApplicationID
-	g.addNode(app, NodeApplication, f.ApplicationID)
-	g.addNode(f.Workload.ID, NodeWorkload, f.Workload.Kind+" "+f.Workload.Name)
-	g.addNode(f.Container.ID, NodeContainer, f.Container.Name)
-	g.addEdge(app, f.Container.ID, EdgeRuns)
+	if f.Layers.Application {
+		g.addNode(app, NodeApplication, f.ApplicationID)
+	}
+	if f.Layers.Deployment {
+		g.addNode(f.Workload.ID, NodeWorkload, f.Workload.Kind+" "+f.Workload.Name)
+	}
+	if f.Container.ID != "" {
+		g.addNode(f.Container.ID, NodeContainer, f.Container.Name)
+		if f.Layers.Application {
+			g.addEdge(app, f.Container.ID, EdgeRuns)
+		}
+	}
 	for _, r := range f.EnvReads {
 		g.addNode(r.ID, NodeEnvRead, labelOr(r.Name, "<dynamic>"))
-		g.addEdge(app, r.ID, EdgeReads)
+		if f.Layers.Application {
+			g.addEdge(app, r.ID, EdgeReads)
+		}
 	}
 	for _, s := range f.Container.Supplies {
 		g.addNode(s.ID, NodeEnvSupply, labelOr(s.Name, "<unresolved envFrom>"))
-		g.addEdge(f.Container.ID, s.ID, EdgeSupplies)
+		if f.Container.ID != "" {
+			g.addEdge(f.Container.ID, s.ID, EdgeSupplies)
+		}
 		if s.State == model.SupplyDefinite {
 			for _, r := range f.EnvReads {
 				if r.Resolved && r.Name == s.Name {
@@ -84,7 +96,9 @@ func Build(f *model.Facts) *Graph {
 	}
 	for _, p := range f.ListenPorts {
 		g.addNode(p.ID, NodeListenPort, portLabel(p.Port, p.EnvName))
-		g.addEdge(app, p.ID, EdgeListens)
+		if f.Layers.Application {
+			g.addEdge(app, p.ID, EdgeListens)
+		}
 	}
 	for i, p := range f.Container.Ports {
 		id := fmt.Sprintf("containerport:%s:%d", f.Container.ID, i)
@@ -93,7 +107,9 @@ func Build(f *model.Facts) *Graph {
 	}
 	for _, s := range f.Services {
 		g.addNode(s.ID, NodeService, s.Name)
-		g.addEdge(s.ID, f.Workload.ID, EdgeSelects)
+		if f.Workload.ID != "" {
+			g.addEdge(s.ID, f.Workload.ID, EdgeSelects)
+		}
 		for i, p := range s.Ports {
 			id := fmt.Sprintf("serviceport:%s:%d", s.ID, i)
 			g.addNode(id, NodeServicePort, fmt.Sprintf("%d -> %d", p.Port, p.TargetPort))
