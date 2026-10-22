@@ -1,0 +1,17 @@
+image:
+  repository: payment-service
+  tag: local
+  pullPolicy: IfNotPresent
+
+databaseEnvName: DATABASE_URL
+includeDatabaseEnv: true
+includeDatabaseKey: true
+appPort: "8080"
+enableMetrics: "false"
+includeMetricsEnv: true
+apiToken: development-placeholder
+extraEnv: {}
+
+service:
+  port: 80
+  targetPort: http

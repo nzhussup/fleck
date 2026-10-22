@@ -1,0 +1,6 @@
+databaseEnvName: DATABASES_URL
+appPort: "8080"
+extraEnv:
+  LEGACY_API_KEY: obsolete-placeholder
+service:
+  targetPort: 3000

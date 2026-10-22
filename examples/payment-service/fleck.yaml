@@ -1,0 +1,22 @@
+version: 1
+
+application:
+  language: go
+  path: ./cmd/api
+
+deployment:
+  type: helm
+  chart: ./deploy/helm/payment-service
+  release: payment-service
+  values:
+    - ./deploy/helm/payment-service/values-valid.yaml
+  workload:
+    kind: Deployment
+    name: payment-service
+  container: payment-service
+
+dockerfile:
+  path: ./Dockerfile
+
+analysis:
+  rules: [CFG001, CFG002, CFG003, CFG004]

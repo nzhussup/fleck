@@ -1,0 +1,23 @@
+schemaVersion: "1"
+cases:
+  - id: valid-baseline
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-valid.yaml
+    expectedErrorRules: []
+  - id: all-four-rules
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-faulty.yaml
+    expectedRules: [CFG001, CFG002, CFG003, CFG004]
+  - id: missing-required
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-missing-required.yaml
+    expectedRules: [CFG001]
+  - id: missing-configmap-key
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-missing-configmap-key.yaml
+    expectedDiagnostics: [missing-mandatory-reference]
+  - id: optional-omitted
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-optional-omitted.yaml
+    expectedErrorRules: []
+  - id: named-target-port
+    values: ../../examples/payment-service/deploy/helm/payment-service/values-named-port.yaml
+    expectedErrorRules: []
+  - id: unresolved-dynamic-read
+    source: go/dynamic/main.go
+    expectedBehavior: CFG004 suppressed because a dynamic environment read may consume supplies

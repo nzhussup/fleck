@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-service-config
+data:
+  {{- if .Values.includeDatabaseKey }}
+  database-url: "postgres://db.example.invalid/payments"
+  {{- end }}
+  app-port: {{ .Values.appPort | quote }}
+  enable-metrics: {{ .Values.enableMetrics | quote }}

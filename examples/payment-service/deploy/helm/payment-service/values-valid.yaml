@@ -1,0 +1,4 @@
+databaseEnvName: DATABASE_URL
+appPort: "8080"
+service:
+  targetPort: http

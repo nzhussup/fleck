@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payment-service
+    spec:
+      containers:
+        - name: payment-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+          {{- if .Values.includeDatabaseEnv }}
+            - name: {{ .Values.databaseEnvName }}
+              valueFrom:
+                configMapKeyRef:
+                  name: payment-service-config
+                  key: database-url
+          {{- end }}
+            - name: APP_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: payment-service-config
+                  key: app-port
+          {{- if .Values.includeMetricsEnv }}
+            - name: ENABLE_METRICS
+              valueFrom:
+                configMapKeyRef:
+                  name: payment-service-config
+                  key: enable-metrics
+          {{- end }}
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: payment-service-secrets
+                  key: api-token
+          {{- range $name, $value := .Values.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
