@@ -35,3 +35,38 @@ func TestExactUnverifiedDeclarationSuppressesTypoSuggestion(t *testing.T) {
 		t.Fatalf("findings=%#v, want exact unverified declaration to suppress typo heuristic", findings)
 	}
 }
+
+func TestComparesUniqueReadNames(t *testing.T) {
+	facts := &model.Facts{
+		ApplicationID: "app",
+		EnvReads: []model.EnvRead{
+			{ID: "read-1", Name: "DATABASE_URL", Resolved: true},
+			{ID: "read-2", Name: "DATABASE_URL", Resolved: true},
+		},
+		Container: model.Container{Supplies: []model.EnvSupply{{ID: "supply", Name: "DATABASE_URI", State: model.SupplyDefinite}}},
+	}
+	findings, err := New(DefaultThreshold).Detect(context.Background(), &detector.AnalysisContext{Facts: facts, Queries: graph.Queries{Facts: facts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].Evidence[0].Attributes["candidate"] != "DATABASE_URI" {
+		t.Fatalf("findings=%#v", findings)
+	}
+}
+
+func TestAmbiguousCandidatesDoNotProduceSuggestion(t *testing.T) {
+	facts := &model.Facts{
+		EnvReads: []model.EnvRead{{ID: "read", Name: "DATABASE_UR", Resolved: true}},
+		Container: model.Container{Supplies: []model.EnvSupply{
+			{ID: "left", Name: "DATABASE_URL", State: model.SupplyDefinite},
+			{ID: "right", Name: "DATABASE_URI", State: model.SupplyDefinite},
+		}},
+	}
+	findings, err := New(DefaultThreshold).Detect(context.Background(), &detector.AnalysisContext{Facts: facts, Queries: graph.Queries{Facts: facts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("ambiguous suggestions=%#v", findings)
+	}
+}

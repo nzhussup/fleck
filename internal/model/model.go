@@ -9,9 +9,11 @@ type SourceLocation struct {
 }
 
 type Evidence struct {
-	Kind        string         `json:"kind"`
-	Description string         `json:"description"`
-	Location    SourceLocation `json:"location,omitempty"`
+	Kind        string            `json:"kind"`
+	Description string            `json:"description"`
+	Location    SourceLocation    `json:"location,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+	Path        []string          `json:"path,omitempty"`
 }
 
 type Requirement string
@@ -99,13 +101,15 @@ type Workload struct {
 }
 
 type ServicePort struct {
-	Name           string         `json:"name,omitempty"`
-	Port           int            `json:"port"`
-	TargetPortName string         `json:"targetPortName,omitempty"`
-	TargetPort     int            `json:"targetPort,omitempty"`
-	TargetResolved bool           `json:"targetResolved"`
-	Protocol       string         `json:"protocol"`
-	Location       SourceLocation `json:"location,omitempty"`
+	Name            string         `json:"name,omitempty"`
+	Port            int            `json:"port"`
+	TargetPortName  string         `json:"targetPortName,omitempty"`
+	TargetPort      int            `json:"targetPort,omitempty"`
+	TargetResolved  bool           `json:"targetResolved"`
+	TargetContainer string         `json:"targetContainer,omitempty"`
+	TargetAmbiguous bool           `json:"targetAmbiguous,omitempty"`
+	Protocol        string         `json:"protocol"`
+	Location        SourceLocation `json:"location,omitempty"`
 }
 
 type Service struct {
@@ -117,24 +121,26 @@ type Service struct {
 }
 
 type DockerFacts struct {
-	Environment  []EnvSupply `json:"environment,omitempty"`
-	ExposedPorts []int       `json:"exposedPorts,omitempty"`
-	Entrypoint   []string    `json:"entrypoint,omitempty"`
-	Command      []string    `json:"command,omitempty"`
+	Environment  []EnvSupply    `json:"environment,omitempty"`
+	ExposedPorts []int          `json:"exposedPorts,omitempty"`
+	Entrypoint   []string       `json:"entrypoint,omitempty"`
+	Command      []string       `json:"command,omitempty"`
+	Location     SourceLocation `json:"location,omitempty"`
 }
 
 type Facts struct {
-	ApplicationID   string            `json:"applicationId,omitempty"`
-	ApplicationPath string            `json:"applicationPath,omitempty"`
-	EnvReads        []EnvRead         `json:"envReads"`
-	ListenPorts     []ListenPort      `json:"listenPorts"`
-	Workload        Workload          `json:"workload"`
-	Container       Container         `json:"container"`
-	Services        []Service         `json:"services"`
-	Docker          DockerFacts       `json:"docker"`
-	Diagnostics     []Diagnostic      `json:"diagnostics,omitempty"`
-	Layers          LayerAvailability `json:"layers"`
-	Capabilities    CapabilitySet     `json:"capabilities"`
+	ApplicationID     string             `json:"applicationId,omitempty"`
+	ApplicationPath   string             `json:"applicationPath,omitempty"`
+	EnvReads          []EnvRead          `json:"envReads"`
+	ListenPorts       []ListenPort       `json:"listenPorts"`
+	Workload          Workload           `json:"workload"`
+	Container         Container          `json:"container"`
+	Services          []Service          `json:"services"`
+	Docker            DockerFacts        `json:"docker"`
+	Diagnostics       []Diagnostic       `json:"diagnostics,omitempty"`
+	InvalidReferences []InvalidReference `json:"invalidReferences,omitempty"`
+	Layers            LayerAvailability  `json:"layers"`
+	Capabilities      CapabilitySet      `json:"capabilities"`
 }
 
 type LayerAvailability struct {
@@ -173,12 +179,27 @@ type Diagnostic struct {
 	Location SourceLocation `json:"location,omitempty"`
 }
 
+type InvalidReference struct {
+	Kind      string         `json:"kind"`
+	Subject   string         `json:"subject"`
+	Reference string         `json:"reference"`
+	Message   string         `json:"message"`
+	Location  SourceLocation `json:"location,omitempty"`
+}
+
 type Severity string
+type Confidence string
 
 const (
 	SeverityInfo    Severity = "info"
 	SeverityWarning Severity = "warning"
 	SeverityError   Severity = "error"
+)
+
+const (
+	ConfidenceHigh   Confidence = "high"
+	ConfidenceMedium Confidence = "medium"
+	ConfidenceLow    Confidence = "low"
 )
 
 func SeverityRank(s Severity) int {
@@ -193,15 +214,17 @@ func SeverityRank(s Severity) int {
 }
 
 type Finding struct {
-	RuleID     string           `json:"ruleId"`
-	RuleName   string           `json:"ruleName"`
-	Severity   Severity         `json:"severity"`
-	Message    string           `json:"message"`
-	Subject    string           `json:"subject,omitempty"`
-	Location   SourceLocation   `json:"location,omitempty"`
-	Related    []SourceLocation `json:"related,omitempty"`
-	Evidence   []Evidence       `json:"evidence,omitempty"`
-	Suggestion string           `json:"suggestion,omitempty"`
+	RuleID         string           `json:"ruleId"`
+	RuleName       string           `json:"ruleName"`
+	Severity       Severity         `json:"severity"`
+	Confidence     Confidence       `json:"confidence"`
+	CorrelationKey string           `json:"correlationKey,omitempty"`
+	Message        string           `json:"message"`
+	Subject        string           `json:"subject,omitempty"`
+	Location       SourceLocation   `json:"location,omitempty"`
+	Related        []SourceLocation `json:"related,omitempty"`
+	Evidence       []Evidence       `json:"evidence,omitempty"`
+	Suggestion     string           `json:"suggestion,omitempty"`
 }
 
 type Timings struct {

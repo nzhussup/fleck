@@ -12,6 +12,7 @@ targets:
       workload:
         kind: Deployment
         name: inventory-monolith
+        namespace: default
       container: inventory-monolith
     analysis:
-      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005, CFG006]

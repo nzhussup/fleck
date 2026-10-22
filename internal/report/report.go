@@ -14,11 +14,13 @@ type Summary struct {
 	Warnings int `json:"warnings"`
 	Info     int `json:"info"`
 	Skipped  int `json:"skipped"`
+	Issues   int `json:"issues"`
 }
 
 func Summarize(findings []model.Finding) Summary {
 	var s Summary
-	for _, f := range findings {
+	issues := map[string]bool{}
+	for index, f := range findings {
 		switch f.Severity {
 		case model.SeverityError:
 			s.Errors++
@@ -27,7 +29,13 @@ func Summarize(findings []model.Finding) Summary {
 		default:
 			s.Info++
 		}
+		key := f.CorrelationKey
+		if key == "" {
+			key = fmt.Sprintf("finding:%d", index)
+		}
+		issues[key] = true
 	}
+	s.Issues = len(issues)
 	return s
 }
 
@@ -89,6 +97,7 @@ func JSONWorkspace(w io.Writer, version string, inputs []Input) error {
 		r.Summary.Warnings += target.Summary.Warnings
 		r.Summary.Info += target.Summary.Info
 		r.Summary.Skipped += target.Summary.Skipped
+		r.Summary.Issues += target.Summary.Issues
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -111,6 +120,9 @@ func newTargetReport(name string, facts *model.Facts, findings []model.Finding, 
 	r.Target.Container = facts.Container.Name
 	if facts.Workload.Kind != "" || facts.Workload.Name != "" {
 		r.Target.Workload = facts.Workload.Kind + "/" + facts.Workload.Name
+		if facts.Workload.Namespace != "" {
+			r.Target.Workload = facts.Workload.Kind + "/" + facts.Workload.Namespace + "/" + facts.Workload.Name
+		}
 	}
 	return r
 }
@@ -135,8 +147,9 @@ func TextWorkspace(w io.Writer, inputs []Input) error {
 		summary.Warnings += current.Warnings
 		summary.Info += current.Info
 		summary.Skipped += len(input.Skipped)
+		summary.Issues += current.Issues
 	}
-	_, err := fmt.Fprintf(w, "\nWorkspace Summary:\n  Errors:   %d\n  Warnings: %d\n  Info:     %d\n  Skipped:  %d\n", summary.Errors, summary.Warnings, summary.Info, summary.Skipped)
+	_, err := fmt.Fprintf(w, "\nWorkspace Summary:\n  Errors:   %d\n  Warnings: %d\n  Info:     %d\n  Issues:   %d\n  Skipped:  %d\n", summary.Errors, summary.Warnings, summary.Info, summary.Issues, summary.Skipped)
 	return err
 }
 
@@ -148,7 +161,11 @@ func Text(w io.Writer, facts *model.Facts, findings []model.Finding, skipped []m
 		fmt.Fprintf(w, "Application: %s\n", facts.ApplicationPath)
 	}
 	if facts.Layers.Deployment {
-		fmt.Fprintf(w, "Deployment: %s/%s\nContainer: %s\n", facts.Workload.Kind, facts.Workload.Name, facts.Container.Name)
+		workload := facts.Workload.Kind + "/" + facts.Workload.Name
+		if facts.Workload.Namespace != "" {
+			workload = facts.Workload.Kind + "/" + facts.Workload.Namespace + "/" + facts.Workload.Name
+		}
+		fmt.Fprintf(w, "Deployment: %s\nContainer: %s\n", workload, facts.Container.Name)
 	} else if facts.Layers.Dockerfile {
 		fmt.Fprintf(w, "Container: %s\n", facts.Container.Name)
 	}
@@ -159,11 +176,23 @@ func Text(w io.Writer, facts *model.Facts, findings []model.Finding, skipped []m
 	fmt.Fprintln(w)
 	for _, f := range findings {
 		fmt.Fprintf(w, "%s %s — %s\n\n  %s\n", f.RuleID, strings.ToUpper(string(f.Severity)), f.RuleName, f.Message)
+		if f.Confidence != "" {
+			fmt.Fprintf(w, "\n  Confidence: %s\n", f.Confidence)
+		}
+		if f.CorrelationKey != "" {
+			fmt.Fprintf(w, "  Related issue: %s\n", f.CorrelationKey)
+		}
 		if f.Location.File != "" {
-			fmt.Fprintf(w, "\n  Location: %s", f.Location.File)
-			if f.Location.Line > 0 {
-				fmt.Fprintf(w, ":%d:%d", f.Location.Line, f.Location.Column)
+			fmt.Fprint(w, "\n  Location: ")
+			writeLocation(w, f.Location)
+			fmt.Fprintln(w)
+		}
+		for _, related := range f.Related {
+			if related.File == "" || related == f.Location {
+				continue
 			}
+			fmt.Fprint(w, "  Related location: ")
+			writeLocation(w, related)
 			fmt.Fprintln(w)
 		}
 		for _, e := range f.Evidence {
@@ -193,8 +222,18 @@ func Text(w io.Writer, facts *model.Facts, findings []model.Finding, skipped []m
 		fmt.Fprintln(w)
 	}
 	s := Summarize(findings)
-	_, err := fmt.Fprintf(w, "Summary:\n  Errors:   %d\n  Warnings: %d\n  Info:     %d\n  Skipped:  %d\n", s.Errors, s.Warnings, s.Info, len(skipped))
+	_, err := fmt.Fprintf(w, "Summary:\n  Errors:   %d\n  Warnings: %d\n  Info:     %d\n  Issues:   %d\n  Skipped:  %d\n", s.Errors, s.Warnings, s.Info, s.Issues, len(skipped))
 	return err
+}
+
+func writeLocation(w io.Writer, location model.SourceLocation) {
+	fmt.Fprint(w, location.File)
+	if location.Line > 0 {
+		fmt.Fprintf(w, ":%d", location.Line)
+		if location.Column > 0 {
+			fmt.Fprintf(w, ":%d", location.Column)
+		}
+	}
 }
 
 func writeLayer(w io.Writer, name string, analyzed bool) {

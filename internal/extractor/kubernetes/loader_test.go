@@ -34,3 +34,28 @@ func TestLoadManifestsReadsDirectoriesDeterministically(t *testing.T) {
 		t.Fatalf("overlapping paths loaded a manifest more than once: %s", text)
 	}
 }
+
+func TestLoadedManifestKeepsSourceFileAndLocalLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deployment.yaml")
+	contents := `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app}
+spec: {template: {spec: {containers: [{name: app, env: [{name: UNUSED, value: value}]}]}}}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := LoadManifests(context.Background(), []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ExtractInNamespaceWithOrigins(manifest, "Deployment", "app", "", "app", OriginOptions{RootPath: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := result.Container.Supplies[0].Location
+	if location.File != "deployment.yaml" || location.Line != 1 {
+		t.Fatalf("location=%#v", location)
+	}
+}

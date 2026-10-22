@@ -37,16 +37,18 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 	var findings []model.Finding
 	if analysis.Facts.Capabilities.Has(model.CapabilityDockerPorts) {
 		exposed := intSet(analysis.Facts.Docker.ExposedPorts)
-		if len(exposed) > 0 && !sameSet(declared, exposed) {
+		if len(exposed) > 0 && !setsOverlap(declared, exposed) && !hasVerifiedRuntimeMismatch(analysis) {
 			findings = append(findings, model.Finding{
-				RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
-				Subject: analysis.Facts.Container.Name,
+				RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity, Confidence: model.ConfidenceMedium,
+				CorrelationKey: "port-metadata:" + analysis.Facts.Container.ID,
+				Subject:        analysis.Facts.Container.Name,
+				Location:       analysis.Facts.Docker.Location,
 				Message: fmt.Sprintf(
 					"Dockerfile EXPOSE ports [%s] differ from Kubernetes container ports [%s]",
 					formatSet(exposed), formatSet(declared),
 				),
 				Evidence: []model.Evidence{
-					{Kind: "docker-expose", Description: "Dockerfile EXPOSE: " + formatSet(exposed)},
+					{Kind: "docker-expose", Description: "Dockerfile EXPOSE: " + formatSet(exposed), Location: analysis.Facts.Docker.Location},
 					{Kind: "container-port", Description: "Kubernetes containerPort: " + formatSet(declared)},
 				},
 				Suggestion: "Verify that these metadata declarations describe the port on which the application actually listens.",
@@ -54,28 +56,29 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 		}
 	}
 
+	return findings, nil
+}
+
+func hasVerifiedRuntimeMismatch(analysis *detector.AnalysisContext) bool {
+	if len(analysis.Facts.ListenPorts) != 1 || !analysis.Facts.ListenPorts[0].Resolved {
+		return false
+	}
+	listener := analysis.Facts.ListenPorts[0]
 	for _, service := range analysis.Queries.ServicesForWorkload() {
 		for _, port := range service.Ports {
-			if !port.TargetResolved || !strings.EqualFold(port.Protocol, "TCP") || declared[port.TargetPort] {
+			if !port.TargetResolved || port.TargetAmbiguous || !strings.EqualFold(port.Protocol, "TCP") || port.TargetPort == listener.Port {
 				continue
 			}
-			findings = append(findings, model.Finding{
-				RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
-				Subject: service.Name,
-				Message: fmt.Sprintf(
-					"Service %s targets port %d, which is not among Kubernetes container ports [%s]",
-					service.Name, port.TargetPort, formatSet(declared),
-				),
-				Location: port.Location,
-				Evidence: []model.Evidence{
-					{Kind: "service-target-port", Description: fmt.Sprintf("Service targetPort: %d", port.TargetPort), Location: port.Location},
-					{Kind: "container-port", Description: "Kubernetes containerPort: " + formatSet(declared)},
-				},
-				Suggestion: "Verify the application listener and align port metadata if the difference is unintended.",
-			})
+			if port.TargetContainer != "" && port.TargetContainer != analysis.Facts.Container.ID {
+				continue
+			}
+			if port.TargetContainer == "" && len(analysis.Facts.Workload.Containers) > 1 {
+				continue
+			}
+			return true
 		}
 	}
-	return findings, nil
+	return false
 }
 
 func portSet(ports []model.ContainerPort) map[int]bool {
@@ -98,16 +101,13 @@ func intSet(values []int) map[int]bool {
 	return set
 }
 
-func sameSet(left, right map[int]bool) bool {
-	if len(left) != len(right) {
-		return false
-	}
+func setsOverlap(left, right map[int]bool) bool {
 	for value := range left {
-		if !right[value] {
-			return false
+		if right[value] {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func formatSet(set map[int]bool) string {

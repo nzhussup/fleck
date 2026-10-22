@@ -7,6 +7,7 @@ import (
 	"github.com/nzhussup/fleck/internal/detector/rules/cfg003"
 	"github.com/nzhussup/fleck/internal/detector/rules/cfg004"
 	"github.com/nzhussup/fleck/internal/detector/rules/cfg005"
+	"github.com/nzhussup/fleck/internal/detector/rules/cfg006"
 )
 
 func All() []detector.Detector {
@@ -16,6 +17,7 @@ func All() []detector.Detector {
 		cfg003.New(),
 		cfg004.New(),
 		cfg005.New(),
+		cfg006.New(),
 	}
 }
 

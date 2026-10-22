@@ -25,14 +25,18 @@ findings plus skipped checks to format-neutral reporters.
    Secrets into typed facts and resolves only same-namespace references.
 5. `internal/extractor/dockerfile` uses BuildKit's Dockerfile parser and reads
    the final runtime stage plus statically named parent stages.
-6. `internal/graph` creates stable occurrence nodes, typed directed edges, and
-   focused query helpers. Graph state is not mutated after construction.
-7. `internal/detector` defines rule contracts and runs enabled rules only when
+6. `internal/resolver` applies effective environment precedence and preserves
+   resolved, absent, unverified, and invalid states for all consumers.
+7. `internal/graph` creates stable resource and occurrence nodes, typed directed
+   edges with relationship states, and focused evidence-path query helpers.
+   Graph state is not mutated after construction.
+8. `internal/detector` defines rule contracts and runs enabled rules only when
    their declared capabilities are available. Independent implementations live
    under `internal/detector/rules/<rule-id>`, while `internal/detector/registry`
    is the composition root that registers them.
-8. `internal/report` renders findings as text or schema-versioned JSON; graph
-   export is deterministic DOT.
+9. `internal/report` renders findings as text or schema-versioned JSON; graph
+   export is deterministic DOT. Severity, confidence, and related-issue grouping
+   remain separate concepts.
 
 Unknown values and unresolved references are explicit states. A missing
 external resource is not converted into proof that an environment variable is
@@ -62,9 +66,9 @@ findings, so they do not require rule-specific changes.
 Dependencies point inward toward stable domain contracts:
 
 ```text
-cli -> app -> extractors / graph / detector engine
+cli -> app -> extractors / resolver / graph / detector engine
                          detector registry -> detector rules -> detector contracts
-report -> model          extractors / graph / detector contracts -> model
+report -> model          extractors / resolver / graph / detector contracts -> model
 ```
 
 Technology-specific implementations belong below their extension point, as the

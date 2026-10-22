@@ -25,13 +25,15 @@ func (r staticRenderer) Render(_ context.Context, _, _ string, _ []string) (helm
 	}
 	db := "DATABASE_URL"
 	target := "http"
+	containerPort := "8080"
 	extra := ""
 	if r.faulty {
 		db = "DATABASES_URL"
-		target = "3000"
+		containerPort = "3000"
 		extra = "\n        - name: LEGACY_API_KEY\n          value: obsolete-placeholder"
 	}
 	m := strings.ReplaceAll(strings.ReplaceAll(renderedManifest, "{{DB}}", db), "{{TARGET}}", target)
+	m = strings.ReplaceAll(m, "{{CONTAINER_PORT}}", containerPort)
 	m = strings.ReplaceAll(m, "{{EXTRA}}", extra)
 	return helm.Result{Manifest: []byte(m), Duration: time.Millisecond}, nil
 }
@@ -135,7 +137,7 @@ func TestCheckApplicationOnlyReportsUnavailableCrossLayerChecks(t *testing.T) {
 	if !strings.Contains(got, "Application source:     analyzed") || !strings.Contains(got, "Kubernetes deployment:  not provided") {
 		t.Fatalf("layer availability missing:\n%s", got)
 	}
-	for _, id := range []string{"CFG001", "CFG002", "CFG003", "CFG004", "CFG005"} {
+	for _, id := range []string{"CFG001", "CFG002", "CFG003", "CFG004", "CFG005", "CFG006"} {
 		if !strings.Contains(got, id+" SKIPPED") {
 			t.Errorf("output missing skipped %s:\n%s", id, got)
 		}
@@ -196,8 +198,49 @@ func TestCheckDockerfileOnly(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Dockerfile:             analyzed") || !strings.Contains(out.String(), "Skipped:  5") {
+	if !strings.Contains(out.String(), "Dockerfile:             analyzed") || !strings.Contains(out.String(), "Skipped:  6") {
 		t.Fatalf("unexpected output:\n%s", out.String())
+	}
+}
+
+func TestConfirmedInvalidReferenceReturnsExitOne(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "fleck.yaml", `version: 1
+deployment:
+  type: kubernetes
+  manifests: [./resources.yaml]
+  workload: {kind: Deployment, name: app}
+  container: app
+analysis: {rules: [CFG006]}
+`)
+	writeFixture(t, dir, "resources.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata: {name: settings}
+data: {present: value}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app}
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: REQUIRED
+              valueFrom: {configMapKeyRef: {name: settings, key: missing}}
+`)
+
+	out := new(bytes.Buffer)
+	root := NewRoot(Dependencies{Service: app.New(), Out: out, Err: out})
+	root.SetArgs([]string{"check", dir})
+	err := root.Execute()
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("error=%v output=%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "CFG006") || strings.Contains(out.String(), "Diagnostics:") {
+		t.Fatalf("invalid reference was not reported as a finding:\n%s", out.String())
 	}
 }
 
@@ -264,7 +307,7 @@ spec:
           valueFrom: {configMapKeyRef: {name: payment-service-config, key: enable-metrics}}
         - name: API_TOKEN
           valueFrom: {secretKeyRef: {name: payment-service-secrets, key: api-token}}{{EXTRA}}
-        ports: [{name: http, containerPort: 8080, protocol: TCP}]
+        ports: [{name: http, containerPort: {{CONTAINER_PORT}}, protocol: TCP}]
 ---
 apiVersion: v1
 kind: Service

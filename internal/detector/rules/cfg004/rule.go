@@ -42,12 +42,13 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 
 		metadata := current.Metadata()
 		findings = append(findings, model.Finding{
-			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
-			Subject:    supply.Name,
-			Message:    fmt.Sprintf("%s is supplied to container %s, but no matching environment-variable read was found", supply.Name, analysis.Facts.Container.Name),
-			Location:   supply.Location,
-			Evidence:   []model.Evidence{{Kind: "unmatched-supply", Description: "no recognized os.Getenv or os.LookupEnv read matched this name", Location: supply.Location}},
-			Suggestion: "Verify whether an entrypoint, dependency, or runtime component consumes this variable before removing it.",
+			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity, Confidence: model.ConfidenceLow,
+			CorrelationKey: "environment:" + analysis.Facts.ApplicationID + ":" + supply.Name,
+			Subject:        supply.Name,
+			Message:        fmt.Sprintf("%s is supplied to container %s, but no matching environment-variable read was found", supply.Name, analysis.Facts.Container.Name),
+			Location:       supply.Location,
+			Evidence:       []model.Evidence{{Kind: "unmatched-supply", Description: "no recognized os.Getenv or os.LookupEnv read matched this name", Location: supply.Location}},
+			Suggestion:     "Verify whether an entrypoint, dependency, or runtime component consumes this variable before removing it.",
 		})
 	}
 	return findings, nil

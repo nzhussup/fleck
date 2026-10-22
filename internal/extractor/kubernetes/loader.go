@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -71,6 +72,12 @@ func LoadManifests(ctx context.Context, paths []string) ([]byte, error) {
 		if index > 0 {
 			manifest.WriteString("\n---\n")
 		}
+		// Preserve the originating filename when several manifest files are
+		// combined into the byte stream consumed by the extractor. Quoting keeps
+		// unusual but valid filenames from creating ambiguous marker lines.
+		manifest.WriteString("# Fleck-Source: ")
+		manifest.WriteString(strconv.Quote(filepath.Clean(path)))
+		manifest.WriteByte('\n')
 		manifest.Write(contents)
 	}
 	return manifest.Bytes(), nil

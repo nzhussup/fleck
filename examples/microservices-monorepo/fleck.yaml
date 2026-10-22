@@ -11,11 +11,12 @@ targets:
       workload:
         kind: Deployment
         name: orders
+        namespace: default
       container: orders
     dockerfile:
       path: ./services/orders/Dockerfile
     analysis:
-      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005, CFG006]
 
   - name: notifications
     application:

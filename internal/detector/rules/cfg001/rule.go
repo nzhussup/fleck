@@ -6,6 +6,7 @@ import (
 
 	"github.com/nzhussup/fleck/internal/detector"
 	"github.com/nzhussup/fleck/internal/model"
+	"github.com/nzhussup/fleck/internal/resolver"
 )
 
 type rule struct{}
@@ -26,26 +27,18 @@ func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext
 		if !read.Resolved || read.Requirement != model.RequirementRequired {
 			continue
 		}
-		if _, found := analysis.Queries.FindSupply(read.Name); found {
-			continue
-		}
-
-		uncertain := analysis.Queries.HasUnverifiedWildcard()
-		for _, supply := range analysis.Queries.EffectiveSupplies() {
-			if supply.Name == read.Name && supply.State == model.SupplyUnverified {
-				uncertain = true
-			}
-		}
-		if uncertain {
+		resolution := analysis.Queries.ResolveEnvironment(read.Name)
+		if resolution.Status != resolver.EnvironmentAbsent {
 			continue
 		}
 
 		metadata := current.Metadata()
 		findings = append(findings, model.Finding{
-			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
-			Subject:  read.Name,
-			Message:  fmt.Sprintf("Required environment variable %s is not supplied to container %s", read.Name, analysis.Facts.Container.Name),
-			Location: read.Source, Evidence: read.Evidence,
+			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity, Confidence: model.ConfidenceHigh,
+			CorrelationKey: "environment:" + analysis.Facts.ApplicationID + ":" + read.Name,
+			Subject:        read.Name,
+			Message:        fmt.Sprintf("Required environment variable %s is not supplied to container %s", read.Name, analysis.Facts.Container.Name),
+			Location:       read.Source, Evidence: read.Evidence,
 			Suggestion: "Supply " + read.Name + " to the selected container or add an explicit supported application fallback.",
 		})
 	}

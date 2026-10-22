@@ -19,7 +19,7 @@ func TestDocumentedExamplesRemainRunnable(t *testing.T) {
 		{name: "monolith", path: "examples/monolith"},
 		{name: "monorepo orders", path: "examples/microservices-monorepo", target: "orders"},
 		{name: "monorepo notifications", path: "examples/microservices-monorepo", target: "notifications"},
-		{name: "polyrepo joined target", path: "examples/polyrepo", target: "customer-api-development", wantRules: []string{"CFG003", "CFG004", "CFG005"}, wantDiagnostics: 1},
+		{name: "polyrepo joined target", path: "examples/polyrepo", target: "customer-api-development", wantRules: []string{"CFG003", "CFG004"}, wantDiagnostics: 1},
 		{name: "polyrepo second environment", path: "examples/polyrepo", target: "customer-api-production", wantRules: []string{"CFG004"}, wantDiagnostics: 1},
 	}
 

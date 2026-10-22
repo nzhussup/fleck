@@ -61,8 +61,9 @@ func (c *Config) ConfiguredTargets() []TargetConfig {
 }
 
 type WorkloadConfig struct {
-	Kind string `yaml:"kind"`
-	Name string `yaml:"name"`
+	Kind      string `yaml:"kind"`
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace,omitempty"`
 }
 
 type DockerfileConfig struct {

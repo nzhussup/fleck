@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/nzhussup/fleck/internal/model"
@@ -50,11 +52,12 @@ type container struct {
 	} `yaml:"ports"`
 }
 type document struct {
-	APIVersion string            `yaml:"apiVersion"`
-	Kind       string            `yaml:"kind"`
-	Metadata   metadata          `yaml:"metadata"`
-	Data       map[string]string `yaml:"data"`
-	StringData map[string]string `yaml:"stringData"`
+	Location   model.SourceLocation `yaml:"-"`
+	APIVersion string               `yaml:"apiVersion"`
+	Kind       string               `yaml:"kind"`
+	Metadata   metadata             `yaml:"metadata"`
+	Data       map[string]string    `yaml:"data"`
+	StringData map[string]string    `yaml:"stringData"`
 	Spec       struct {
 		Selector map[string]any `yaml:"selector"`
 		Template struct {
@@ -75,23 +78,49 @@ type document struct {
 }
 
 type Result struct {
-	Workload    model.Workload
-	Container   model.Container
-	Services    []model.Service
-	Diagnostics []model.Diagnostic
+	Workload          model.Workload
+	Container         model.Container
+	Services          []model.Service
+	Diagnostics       []model.Diagnostic
+	InvalidReferences []model.InvalidReference
+}
+
+// OriginOptions tells the extractor how to turn provenance comments in a
+// manifest stream into repository paths. Helm emits "# Source:" comments for
+// rendered resources. LoadManifests emits "# Fleck-Source:" comments for raw
+// YAML files.
+type OriginOptions struct {
+	ChartPath string
+	RootPath  string
 }
 
 func Extract(manifest []byte, workloadKind, workloadName, containerName string) (Result, error) {
+	return ExtractInNamespace(manifest, workloadKind, workloadName, "", containerName)
+}
+
+func ExtractInNamespace(manifest []byte, workloadKind, workloadName, workloadNamespace, containerName string) (Result, error) {
+	return ExtractInNamespaceWithOrigins(manifest, workloadKind, workloadName, workloadNamespace, containerName, OriginOptions{})
+}
+
+func ExtractInNamespaceWithOrigins(manifest []byte, workloadKind, workloadName, workloadNamespace, containerName string, origins OriginOptions) (Result, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(manifest))
+	lines := strings.Split(string(manifest), "\n")
 	var docs []document
 	for {
-		var d document
-		err := dec.Decode(&d)
+		var node yaml.Node
+		err := dec.Decode(&node)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return Result{}, fmt.Errorf("parse rendered Kubernetes YAML: %w", err)
+		}
+		var d document
+		if err := node.Decode(&d); err != nil {
+			return Result{}, fmt.Errorf("decode rendered Kubernetes YAML: %w", err)
+		}
+		if len(node.Content) > 0 {
+			d.Location = manifestLocation(lines, node.Content[0].Line, origins)
 		}
 		if d.Kind != "" {
 			if d.Metadata.Namespace == "" {
@@ -102,7 +131,7 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 	}
 	var chosen *document
 	for i := range docs {
-		if docs[i].Kind == workloadKind && docs[i].Metadata.Name == workloadName {
+		if docs[i].Kind == workloadKind && docs[i].Metadata.Name == workloadName && (workloadNamespace == "" || docs[i].Metadata.Namespace == workloadNamespace) {
 			if chosen != nil {
 				return Result{}, fmt.Errorf("workload %s/%s is ambiguous", workloadKind, workloadName)
 			}
@@ -159,22 +188,22 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 	// Kubernetes applies envFrom sources before explicit env entries; later values win.
 	for _, ef := range selected.EnvFrom {
 		if ef.ConfigMap != nil {
-			resolveFrom(add, &out, configMaps, chosen.Metadata.Namespace, ef.Prefix, ef.ConfigMap.Name, ef.ConfigMap.Optional, false)
+			resolveFrom(add, &out, configMaps, chosen.Metadata.Namespace, ef.Prefix, ef.ConfigMap.Name, ef.ConfigMap.Optional, false, chosen.Location)
 		} else if ef.Secret != nil {
-			resolveFrom(add, &out, secrets, chosen.Metadata.Namespace, ef.Prefix, ef.Secret.Name, ef.Secret.Optional, true)
+			resolveFrom(add, &out, secrets, chosen.Metadata.Namespace, ef.Prefix, ef.Secret.Name, ef.Secret.Optional, true, chosen.Location)
 		}
 	}
 	for _, e := range selected.Env {
 		if e.ValueFrom.ConfigMap == nil && e.ValueFrom.Secret == nil {
-			add(model.EnvSupply{Name: e.Name, Value: e.Value, ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyKubernetes, Location: renderedLoc()})
+			add(model.EnvSupply{Name: e.Name, Value: e.Value, ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyKubernetes, Location: chosen.Location})
 			continue
 		}
 		if e.ValueFrom.ConfigMap != nil {
 			ref := e.ValueFrom.ConfigMap
-			resolveKey(add, &out, configMaps, chosen.Metadata.Namespace, e.Name, ref.Name, ref.Key, ref.Optional, false)
+			resolveKey(add, &out, configMaps, chosen.Metadata.Namespace, e.Name, ref.Name, ref.Key, ref.Optional, false, chosen.Location)
 		} else {
 			ref := e.ValueFrom.Secret
-			resolveKey(add, &out, secrets, chosen.Metadata.Namespace, e.Name, ref.Name, ref.Key, ref.Optional, true)
+			resolveKey(add, &out, secrets, chosen.Metadata.Namespace, e.Name, ref.Name, ref.Key, ref.Optional, true, chosen.Location)
 		}
 	}
 	for _, d := range docs {
@@ -183,14 +212,14 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 		}
 		selector := selectorStrings(d.Spec.Selector)
 		if !selectorMatchesAnyWorkload(docs, d.Metadata.Namespace, selector) {
-			out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: fmt.Sprintf("Service %s selector matches no workload represented in the analyzed manifests; the manifest set may be incomplete", d.Metadata.Name), Location: renderedLoc()})
+			out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: fmt.Sprintf("Service %s selector matches no workload represented in the analyzed manifests; the manifest set may be incomplete", d.Metadata.Name), Location: d.Location})
 		}
 		if !selectorMatches(selector, w.Labels) {
 			continue
 		}
 		s := model.Service{ID: resourceID("Service", d.Metadata.Namespace, d.Metadata.Name), Name: d.Metadata.Name, Namespace: d.Metadata.Namespace, Selector: selector}
 		for _, p := range d.Spec.Ports {
-			sp := model.ServicePort{Name: p.Name, Port: p.Port, Protocol: p.Protocol, Location: renderedLoc()}
+			sp := model.ServicePort{Name: p.Name, Port: p.Port, Protocol: p.Protocol, Location: d.Location}
 			if sp.Protocol == "" {
 				sp.Protocol = "TCP"
 			}
@@ -204,20 +233,30 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 					sp.TargetResolved = true
 				} else {
 					sp.TargetPortName = x
+					var matches []struct {
+						container string
+						port      int
+					}
 					for _, workloadContainer := range w.Containers {
 						for _, cp := range workloadContainer.Ports {
 							if cp.Name == x && strings.EqualFold(cp.Protocol, sp.Protocol) {
-								sp.TargetPort = cp.Port
-								sp.TargetResolved = true
-								break
+								matches = append(matches, struct {
+									container string
+									port      int
+								}{container: workloadContainer.ID, port: cp.Port})
 							}
 						}
-						if sp.TargetResolved {
-							break
-						}
 					}
-					if !sp.TargetResolved {
-						out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "error", Message: fmt.Sprintf("Service %s targetPort %q does not match a port declared by the selected workload", d.Metadata.Name, x), Location: renderedLoc()})
+					switch len(matches) {
+					case 0:
+						out.InvalidReferences = append(out.InvalidReferences, model.InvalidReference{Kind: "service-target-port", Subject: d.Metadata.Name, Reference: x, Message: fmt.Sprintf("Service %s targetPort %q does not match a port declared by the selected workload", d.Metadata.Name, x), Location: d.Location})
+					case 1:
+						sp.TargetPort = matches[0].port
+						sp.TargetContainer = matches[0].container
+						sp.TargetResolved = true
+					default:
+						sp.TargetAmbiguous = true
+						out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: fmt.Sprintf("Service %s targetPort %q matches multiple workload containers", d.Metadata.Name, x), Location: d.Location})
 					}
 				}
 			case nil:
@@ -228,12 +267,11 @@ func Extract(manifest []byte, workloadKind, workloadName, containerName string) 
 		}
 		out.Services = append(out.Services, s)
 	}
-	sort.Slice(out.Container.Supplies, func(i, j int) bool { return out.Container.Supplies[i].ID < out.Container.Supplies[j].ID })
 	sort.Slice(out.Services, func(i, j int) bool { return out.Services[i].ID < out.Services[j].ID })
 	return out, nil
 }
 
-func resolveKey(add func(model.EnvSupply), out *Result, resources map[string]document, ns, envName, resName, key string, optional, sensitive bool) {
+func resolveKey(add func(model.EnvSupply), out *Result, resources map[string]document, ns, envName, resName, key string, optional, sensitive bool, location model.SourceLocation) {
 	src := model.SupplyConfigMap
 	if sensitive {
 		src = model.SupplySecret
@@ -241,8 +279,8 @@ func resolveKey(add func(model.EnvSupply), out *Result, resources map[string]doc
 	ref := ns + "/" + resName + ":" + key
 	d, ok := resources[ns+"/"+resName]
 	if !ok {
-		add(model.EnvSupply{Name: envName, State: model.SupplyUnverified, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: renderedLoc()})
-		out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: "referenced resource cannot be verified: " + ref, Location: renderedLoc()})
+		add(model.EnvSupply{Name: envName, State: model.SupplyUnverified, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: location})
+		out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: "referenced resource cannot be verified: " + ref, Location: location})
 		return
 	}
 	v, ok := d.Data[key]
@@ -254,28 +292,28 @@ func resolveKey(add func(model.EnvSupply), out *Result, resources map[string]doc
 		if optional {
 			state = model.SupplyMissingOptional
 		}
-		add(model.EnvSupply{Name: envName, State: state, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: renderedLoc()})
+		add(model.EnvSupply{Name: envName, State: state, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: location})
 		if !optional {
-			out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "error", Message: "mandatory referenced key is missing: " + ref, Location: renderedLoc()})
+			out.InvalidReferences = append(out.InvalidReferences, model.InvalidReference{Kind: "environment-key", Subject: envName, Reference: ref, Message: "mandatory referenced key is missing: " + ref, Location: location})
 		}
 		return
 	}
-	s := model.EnvSupply{Name: envName, State: model.SupplyDefinite, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: renderedLoc()}
+	s := model.EnvSupply{Name: envName, State: model.SupplyDefinite, SourceKind: src, Reference: ref, Optional: optional, Sensitive: sensitive, Location: location}
 	if !sensitive {
 		s.Value = v
 		s.ValueKnown = true
 	}
 	add(s)
 }
-func resolveFrom(add func(model.EnvSupply), out *Result, resources map[string]document, ns, prefix, name string, optional, sensitive bool) {
+func resolveFrom(add func(model.EnvSupply), out *Result, resources map[string]document, ns, prefix, name string, optional, sensitive bool, location model.SourceLocation) {
 	src := model.SupplyConfigMap
 	if sensitive {
 		src = model.SupplySecret
 	}
 	d, ok := resources[ns+"/"+name]
 	if !ok {
-		add(model.EnvSupply{Name: "", State: model.SupplyUnverified, SourceKind: src, Reference: ns + "/" + name, Optional: optional, Sensitive: sensitive, Location: renderedLoc()})
-		out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: "referenced resource cannot be verified: " + ns + "/" + name, Location: renderedLoc()})
+		add(model.EnvSupply{Name: "", State: model.SupplyUnverified, SourceKind: src, Reference: ns + "/" + name, Optional: optional, Sensitive: sensitive, Location: location})
+		out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Level: "warning", Message: "referenced resource cannot be verified: " + ns + "/" + name, Location: location})
 		return
 	}
 	keys := make([]string, 0, len(d.Data)+len(d.StringData))
@@ -289,7 +327,7 @@ func resolveFrom(add func(model.EnvSupply), out *Result, resources map[string]do
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		s := model.EnvSupply{Name: prefix + k, State: model.SupplyDefinite, SourceKind: src, Reference: ns + "/" + name + ":" + k, Sensitive: sensitive, Location: renderedLoc()}
+		s := model.EnvSupply{Name: prefix + k, State: model.SupplyDefinite, SourceKind: src, Reference: ns + "/" + name + ":" + k, Sensitive: sensitive, Location: location}
 		if !sensitive {
 			s.Value = d.Data[k]
 			if v, ok := d.StringData[k]; ok {
@@ -331,7 +369,50 @@ func selectorStrings(raw map[string]any) map[string]string {
 	return out
 }
 func resourceID(k, ns, n string) string { return strings.ToLower(k) + ":" + ns + "/" + n }
-func renderedLoc() model.SourceLocation { return model.SourceLocation{File: "<helm-rendered>"} }
+
+func manifestLocation(lines []string, rootLine int, origins OriginOptions) model.SourceLocation {
+	for index := rootLine - 2; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if strings.HasPrefix(line, "# Fleck-Source:") {
+			encoded := strings.TrimSpace(strings.TrimPrefix(line, "# Fleck-Source:"))
+			source, err := strconv.Unquote(encoded)
+			if err != nil {
+				break
+			}
+			return model.SourceLocation{File: reportPath(source, origins.RootPath), Line: rootLine - (index + 1)}
+		}
+		if strings.HasPrefix(line, "# Source:") {
+			source := strings.TrimSpace(strings.TrimPrefix(line, "# Source:"))
+			return model.SourceLocation{File: helmSourcePath(source, origins)}
+		}
+	}
+	return model.SourceLocation{File: "<generated Kubernetes manifest>", Line: rootLine}
+}
+
+func helmSourcePath(source string, origins OriginOptions) string {
+	if origins.ChartPath == "" {
+		return source
+	}
+	source = filepath.FromSlash(filepath.Clean(source))
+	parts := strings.Split(source, string(filepath.Separator))
+	var candidate string
+	if len(parts) > 1 && parts[0] == filepath.Base(filepath.Clean(origins.ChartPath)) {
+		candidate = filepath.Join(origins.ChartPath, filepath.Join(parts[1:]...))
+	} else {
+		candidate = filepath.Join(origins.ChartPath, "charts", source)
+	}
+	return reportPath(candidate, origins.RootPath)
+}
+
+func reportPath(path, root string) string {
+	path = filepath.Clean(path)
+	if root != "" && filepath.IsAbs(path) {
+		if relative, err := filepath.Rel(root, path); err == nil {
+			path = relative
+		}
+	}
+	return filepath.ToSlash(path)
+}
 func parseYAMLInt(s string) int {
 	n := 0
 	for _, r := range s {

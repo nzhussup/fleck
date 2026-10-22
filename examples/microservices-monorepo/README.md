@@ -10,7 +10,7 @@ fleck check . --target orders
 fleck check . --target notifications
 ```
 
-- `orders` has Go source, a Dockerfile, and raw Kubernetes manifests. All five
+- `orders` has Go source, a Dockerfile, and raw Kubernetes manifests. All six
   rules run and the configuration is consistent.
 - `notifications` is a worker with Go source and a Dockerfile but no deployment
   manifests. Its target enables only CFG002 and CFG004, demonstrating that rule

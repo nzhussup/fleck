@@ -17,6 +17,7 @@ import (
 	kubeextract "github.com/nzhussup/fleck/internal/extractor/kubernetes"
 	"github.com/nzhussup/fleck/internal/graph"
 	"github.com/nzhussup/fleck/internal/model"
+	"github.com/nzhussup/fleck/internal/resolver"
 )
 
 type Service struct{ Renderer helm.Renderer }
@@ -135,12 +136,16 @@ func (s *Service) analyzeTarget(ctx context.Context, repository string, cfg *con
 			return Result{}, renderErr
 		}
 		start := time.Now()
-		kube, extractErr := kubeextract.Extract(manifest, target.Deployment.Workload.Kind, target.Deployment.Workload.Name, target.Deployment.Container)
+		origins := kubeextract.OriginOptions{RootPath: cfg.BaseDir}
+		if target.Deployment.Type == "helm" {
+			origins.ChartPath = cfg.ResolveIn(target.Deployment.Repository, target.Deployment.Chart)
+		}
+		kube, extractErr := kubeextract.ExtractInNamespaceWithOrigins(manifest, target.Deployment.Workload.Kind, target.Deployment.Workload.Name, target.Deployment.Workload.Namespace, target.Deployment.Container, origins)
 		timings.KubernetesExtraction = time.Since(start)
 		if extractErr != nil {
 			return Result{}, extractErr
 		}
-		facts.Workload, facts.Container, facts.Services, facts.Diagnostics = kube.Workload, kube.Container, kube.Services, kube.Diagnostics
+		facts.Workload, facts.Container, facts.Services, facts.Diagnostics, facts.InvalidReferences = kube.Workload, kube.Container, kube.Services, kube.Diagnostics, kube.InvalidReferences
 		facts.Capabilities[model.CapabilityDeploymentEnv] = true
 		facts.Capabilities[model.CapabilityEnvSupplies] = true
 		facts.Capabilities[model.CapabilityContainerPorts] = true
@@ -154,7 +159,8 @@ func (s *Service) analyzeTarget(ctx context.Context, repository string, cfg *con
 			facts.Container = model.Container{ID: containerID, Name: "image"}
 		}
 		start := time.Now()
-		docker, extractErr := dockerextract.Extract(cfg.ResolveIn(target.Dockerfile.Repository, target.Dockerfile.Path), containerID)
+		dockerfilePath := cfg.ResolveIn(target.Dockerfile.Repository, target.Dockerfile.Path)
+		docker, extractErr := dockerextract.ExtractWithSource(dockerfilePath, sourcePath(cfg.BaseDir, dockerfilePath), containerID)
 		timings.DockerExtraction = time.Since(start)
 		if extractErr != nil {
 			return Result{}, extractErr
@@ -186,6 +192,14 @@ func (s *Service) analyzeTarget(ctx context.Context, repository string, cfg *con
 	}
 	result.Timings.Total = time.Since(total)
 	return result, nil
+}
+
+func sourcePath(root, path string) string {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(filepath.Clean(path))
+	}
+	return filepath.ToSlash(relative)
 }
 
 func effectiveValues(cfg *config.Config, configured config.TargetConfig, repository string, overrides []string) ([]string, error) {
@@ -232,15 +246,15 @@ func effectiveOrder(image, kube []model.EnvSupply) []model.EnvSupply {
 	return out
 }
 func resolveListenPorts(f *model.Facts) {
-	q := graph.Queries{Facts: f}
 	for i := range f.ListenPorts {
 		p := &f.ListenPorts[i]
 		if p.Resolved || p.EnvName == "" {
 			continue
 		}
-		if s, ok := q.FindSupply(p.EnvName); ok {
-			if s.ValueKnown {
-				n, err := strconv.Atoi(s.Value)
+		resolved := resolver.Resolve(f.Container.Supplies, p.EnvName)
+		if resolved.Status == resolver.EnvironmentResolved {
+			if resolved.ValueKnown {
+				n, err := strconv.Atoi(resolved.Value)
 				if err == nil && n > 0 && n <= 65535 {
 					p.Port = n
 					p.Resolved = true
@@ -248,13 +262,7 @@ func resolveListenPorts(f *model.Facts) {
 			}
 			continue
 		}
-		uncertain := q.HasUnverifiedWildcard()
-		for _, s := range f.Container.Supplies {
-			if s.Name == p.EnvName && s.State == model.SupplyUnverified {
-				uncertain = true
-			}
-		}
-		if !uncertain && p.DefaultPort > 0 {
+		if resolved.Status == resolver.EnvironmentAbsent && p.DefaultPort > 0 {
 			p.Port = p.DefaultPort
 			p.Resolved = true
 		}

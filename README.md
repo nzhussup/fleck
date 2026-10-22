@@ -23,11 +23,14 @@ application.
 | CFG002 | warning | Probable environment-variable naming mismatch |
 | CFG003 | error | Port configuration mismatch |
 | CFG004 | info | Potentially unused supplied environment variable |
-| CFG005 | warning | Docker/Kubernetes port declarations differ |
+| CFG005 | warning | Docker/Kubernetes port metadata has no common declaration |
+| CFG006 | error | Proven invalid Kubernetes configuration reference |
 
 Fleck explicitly distinguishes required, optional, and unknown reads. It also
 distinguishes absence from an unresolved external reference. CFG002 and CFG004
-are deliberately worded as heuristics rather than proofs.
+are deliberately worded as heuristics rather than proofs. Findings expose
+confidence separately from severity, and related findings share a correlation
+key so reports can count unique issues without hiding individual rule results.
 
 ## Install and build
 
@@ -104,10 +107,10 @@ targets:
       repository: platform
       type: kubernetes
       manifests: [./clusters/development/customer-api]
-      workload: {kind: Deployment, name: customer-api}
+      workload: {kind: Deployment, name: customer-api, namespace: production}
       container: customer-api
     analysis:
-      rules: [CFG001, CFG002, CFG003, CFG004, CFG005]
+      rules: [CFG001, CFG002, CFG003, CFG004, CFG005, CFG006]
 
   - name: billing-worker
     application:
@@ -144,12 +147,12 @@ deployment:
   chart: ./deploy/helm/payment-service
   release: payment-service
   values: [./deploy/helm/payment-service/values-valid.yaml]
-  workload: {kind: Deployment, name: payment-service}
+  workload: {kind: Deployment, name: payment-service, namespace: default}
   container: payment-service
 dockerfile:
   path: ./Dockerfile
 analysis:
-  rules: [CFG001, CFG002, CFG003, CFG004]
+  rules: [CFG001, CFG002, CFG003, CFG004, CFG005, CFG006]
 ```
 
 Raw Kubernetes manifests can replace Helm:
@@ -164,7 +167,7 @@ deployment:
 dockerfile:
   path: ./Dockerfile
 analysis:
-  rules: [CFG005]
+  rules: [CFG005, CFG006]
 ```
 
 Fleck runs only rules whose required capabilities are available. A successfully
@@ -196,8 +199,10 @@ analysis could not be completed. The default failure threshold is `error`.
 
 JSON uses schema version `1`, stable rule IDs, deterministic finding ordering,
 explicit findings and skipped-check arrays, layer availability, summaries,
-diagnostics, and phase timings. Workspace reports contain a named `targets`
-array plus an aggregate summary.
+diagnostics, confidence, correlation keys, unique-issue counts, and phase
+timings. Workspace reports contain a named `targets` array plus an aggregate
+summary. Proven invalid references are CFG006 findings; incomplete analysis and
+external uncertainty remain diagnostics.
 Secret values are never emitted into text, JSON, or DOT.
 
 ## Development
@@ -218,12 +223,12 @@ cluster. See [architecture](docs/architecture.md), [supported patterns](docs/sup
 
 ## Current limitations and roadmap
 
-The MVP intentionally excludes multi-service discovery, Java and other source
+The MVP intentionally excludes multi-service discovery, additional source
 languages, full dataflow/call-graph analysis, arbitrary frameworks, runtime
 inspection, automatic fixes, and scientific result generation. Dynamic reads,
 external resources, complex Docker expansion, and multi-level returned-error
 propagation remain unknown when they cannot be defended statically.
 
-Likely next steps are labeled fault-injection automation, Kind runtime
-validation, a simple name-matching baseline for research comparison, and a
-separate Java extractor that emits the same normalized facts.
+The separate follow-up phase is labeled fault-injection automation, Kind
+runtime validation, a simple name-matching baseline, quantitative metrics, and
+layer-ablation experiments.

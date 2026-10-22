@@ -13,10 +13,11 @@ deployment:
   workload:
     kind: Deployment
     name: payment-service
+    namespace: default
   container: payment-service
 
 dockerfile:
   path: ./Dockerfile
 
 analysis:
-  rules: [CFG001, CFG002, CFG003, CFG004]
+  rules: [CFG001, CFG002, CFG003, CFG004, CFG005, CFG006]

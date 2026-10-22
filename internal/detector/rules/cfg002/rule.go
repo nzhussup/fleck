@@ -3,10 +3,13 @@ package cfg002
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/nzhussup/fleck/internal/detector"
 	"github.com/nzhussup/fleck/internal/model"
+	"github.com/nzhussup/fleck/internal/resolver"
 )
 
 const DefaultThreshold = 0.8
@@ -26,58 +29,103 @@ func (rule) Requires() []model.Capability {
 func (current rule) Detect(_ context.Context, analysis *detector.AnalysisContext) ([]model.Finding, error) {
 	supplied := map[string]model.EnvSupply{}
 	declared := map[string]bool{}
-	for _, supply := range analysis.Queries.EffectiveSupplies() {
-		if supply.Name != "" && supply.State != model.SupplyMissingMandatory && supply.State != model.SupplyMissingOptional {
-			declared[supply.Name] = true
+	for _, resolution := range resolver.ResolveAll(analysis.Facts.Container.Supplies) {
+		if resolution.Status != resolver.EnvironmentAbsent {
+			declared[resolution.Name] = true
 		}
-		if supply.Name != "" && supply.State == model.SupplyDefinite {
-			supplied[supply.Name] = supply
+		if resolution.Status == resolver.EnvironmentResolved {
+			supplied[resolution.Name] = resolution.Source
 		}
 	}
 
-	matched := map[string]bool{}
-	var findings []model.Finding
+	reads := map[string]model.EnvRead{}
 	for _, read := range analysis.Queries.EnvironmentReads() {
-		if !read.Resolved {
+		if !read.Resolved || declared[read.Name] {
 			continue
 		}
-		if declared[read.Name] {
-			continue
+		if previous, exists := reads[read.Name]; !exists || read.ID < previous.ID {
+			reads[read.Name] = read
 		}
+	}
 
-		bestName, bestScore := bestCandidate(read.Name, supplied, matched)
-		if bestScore < current.threshold {
+	type proposal struct {
+		read      model.EnvRead
+		candidate string
+		score     float64
+	}
+	names := make([]string, 0, len(reads))
+	for name := range reads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	byCandidate := map[string][]proposal{}
+	for _, name := range names {
+		bestName, bestScore, ambiguous := bestCandidate(name, supplied)
+		if ambiguous || bestScore < current.threshold {
 			continue
 		}
-		matched[bestName] = true
+		byCandidate[bestName] = append(byCandidate[bestName], proposal{read: reads[name], candidate: bestName, score: bestScore})
+	}
 
+	var selected []proposal
+	for _, proposals := range byCandidate {
+		sort.Slice(proposals, func(i, j int) bool {
+			if proposals[i].score != proposals[j].score {
+				return proposals[i].score > proposals[j].score
+			}
+			return proposals[i].read.Name < proposals[j].read.Name
+		})
+		if len(proposals) > 1 && proposals[0].score == proposals[1].score {
+			// One supplied name is equally plausible for competing reads. Do
+			// not manufacture a preferred association.
+			continue
+		}
+		selected = append(selected, proposals[0])
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].read.Name < selected[j].read.Name })
+
+	var findings []model.Finding
+	for _, proposal := range selected {
 		metadata := current.Metadata()
-		candidate := supplied[bestName]
+		candidate := supplied[proposal.candidate]
+		score := strconv.FormatFloat(proposal.score, 'f', 4, 64)
 		findings = append(findings, model.Finding{
-			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity,
-			Subject:  read.Name,
-			Message:  fmt.Sprintf("Application expects %s, but configuration supplies %s (possible naming mismatch)", read.Name, bestName),
-			Location: read.Source, Related: []model.SourceLocation{candidate.Location},
-			Evidence:   []model.Evidence{{Kind: "string-similarity", Description: fmt.Sprintf("normalized similarity %.2f", bestScore)}},
+			RuleID: metadata.ID, RuleName: metadata.Name, Severity: metadata.Severity, Confidence: model.ConfidenceMedium,
+			CorrelationKey: "environment:" + analysis.Facts.ApplicationID + ":" + proposal.read.Name,
+			Subject:        proposal.read.Name,
+			Message:        fmt.Sprintf("Application expects %s, but configuration supplies %s (possible naming mismatch)", proposal.read.Name, proposal.candidate),
+			Location:       proposal.read.Source, Related: []model.SourceLocation{candidate.Location},
+			Evidence: []model.Evidence{{Kind: "string-similarity", Description: fmt.Sprintf("normalized similarity %.2f", proposal.score), Attributes: map[string]string{
+				"expected": proposal.read.Name, "candidate": proposal.candidate, "score": score, "threshold": strconv.FormatFloat(current.threshold, 'f', 4, 64),
+			}}},
 			Suggestion: "Verify the environment-variable names in source and deployment configuration.",
 		})
 	}
 	return findings, nil
 }
 
-func bestCandidate(expected string, supplied map[string]model.EnvSupply, matched map[string]bool) (string, float64) {
+func bestCandidate(expected string, supplied map[string]model.EnvSupply) (string, float64, bool) {
 	bestName := ""
 	bestScore := 0.0
+	names := make([]string, 0, len(supplied))
 	for name := range supplied {
-		if matched[name] || name == expected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	ambiguous := false
+	for _, name := range names {
+		if name == expected {
 			continue
 		}
 		score := similarity(expected, name)
-		if score > bestScore || (score == bestScore && name < bestName) {
+		if score > bestScore {
 			bestName, bestScore = name, score
+			ambiguous = false
+		} else if score == bestScore && score > 0 {
+			ambiguous = true
 		}
 	}
-	return bestName, bestScore
+	return bestName, bestScore, ambiguous
 }
 
 func similarity(a, b string) float64 {

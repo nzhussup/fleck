@@ -19,12 +19,11 @@ production manifest directories. This models one application repository being
 deployed into multiple environments without copying either repository into the
 other.
 
-The deployment repository is a GitOps-style Kubernetes-only repository. It
-demonstrates CFG005 because its Service routes to `9090` while the selected
-container declares `8080`. Fleck reports a cautious warning, not a claim about
-the actual application listener. Its externally managed Secret also appears as
-an unverified-reference diagnostic because the Secret is not checked into this
-repository.
+The deployment repository is a GitOps-style Kubernetes-only repository. Its
+externally managed Secret appears as an unverified-reference diagnostic because
+the Secret is not checked into this repository. Fleck does not treat the
+Service's `9090` target and the `8080` `containerPort` metadata as a separate
+runtime failure; CFG003 compares the route with the proven application listener.
 
 Because the joined source proves that the application listens on `8080`, the
 development Service route also produces the stronger CFG003 error. Production

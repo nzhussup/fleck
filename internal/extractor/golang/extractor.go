@@ -23,9 +23,12 @@ type Result struct {
 }
 
 type assignedRead struct {
-	call                       *ast.CallExpr
-	name, variable, okVariable string
-	resolved                   bool
+	call       *ast.CallExpr
+	name       string
+	variable   types.Object
+	okVariable types.Object
+	function   *ast.FuncDecl
+	resolved   bool
 }
 type valueExpr struct {
 	literal, envName string
@@ -105,7 +108,7 @@ func extractFile(file *ast.File, info *types.Info, fset *token.FileSet, root, ap
 		}
 		return true
 	})
-	vars := map[string]valueExpr{}
+	vars := map[types.Object]valueExpr{}
 	reads := []assignedRead{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -117,23 +120,33 @@ func extractFile(file *ast.File, info *types.Info, fset *token.FileSet, root, ap
 			return true
 		}
 		name, resolved := stringConst(call.Args[0], info)
-		r := assignedRead{call: call, name: name, resolved: resolved}
+		r := assignedRead{call: call, name: name, resolved: resolved, function: enclosingFunction(file, call)}
 		if a, ok := parents[call].(*ast.AssignStmt); ok {
 			for idx, rhs := range a.Rhs {
 				if rhs == call && idx < len(a.Lhs) {
 					if id, ok := a.Lhs[idx].(*ast.Ident); ok {
-						r.variable = id.Name
+						r.variable = objectOf(info, id)
 					}
 					if kind == "lookupenv" && len(a.Lhs) > idx+1 {
 						if id, ok := a.Lhs[idx+1].(*ast.Ident); ok {
-							r.okVariable = id.Name
+							r.okVariable = objectOf(info, id)
 						}
 					}
 				}
 			}
+		} else if spec, ok := parents[call].(*ast.ValueSpec); ok {
+			for idx, value := range spec.Values {
+				if value != call || idx >= len(spec.Names) {
+					continue
+				}
+				r.variable = objectOf(info, spec.Names[idx])
+				if kind == "lookupenv" && len(spec.Names) > idx+1 {
+					r.okVariable = objectOf(info, spec.Names[idx+1])
+				}
+			}
 		}
 		reads = append(reads, r)
-		if r.variable != "" {
+		if r.variable != nil {
 			vars[r.variable] = valueExpr{envName: name}
 		}
 		return true
@@ -149,13 +162,14 @@ func extractFile(file *ast.File, info *types.Info, fset *token.FileSet, root, ap
 				continue
 			}
 			id, ok := a.Lhs[i].(*ast.Ident)
-			if !ok {
+			if !ok || objectOf(info, id) == nil {
 				continue
 			}
 			if s, ok := literalString(rhs, info); ok {
-				v := vars[id.Name]
+				object := objectOf(info, id)
+				v := vars[object]
 				v.literal = s
-				vars[id.Name] = v
+				vars[object] = v
 			}
 		}
 		return true
@@ -168,8 +182,8 @@ func extractFile(file *ast.File, info *types.Info, fset *token.FileSet, root, ap
 			name = ""
 		}
 		out.EnvReads = append(out.EnvReads, model.EnvRead{ID: fmt.Sprintf("envread:%s:%d:%d", loc.File, loc.Line, loc.Column), Application: app, Name: name, Resolved: r.resolved, Requirement: req, Evidence: ev, Source: loc})
-		if r.variable != "" && req == model.RequirementOptional {
-			if p := fallbackPort(file, r.variable, info); p > 0 {
+		if r.variable != nil && req == model.RequirementOptional {
+			if p := fallbackPort(r.function, r.variable, info); p > 0 {
 				v := vars[r.variable]
 				v.defaultPort = p
 				vars[r.variable] = v
@@ -192,7 +206,7 @@ func extractFile(file *ast.File, info *types.Info, fset *token.FileSet, root, ap
 		} else if b, ok := call.Args[0].(*ast.BinaryExpr); ok && b.Op == token.ADD {
 			if prefix, ok := literalString(b.X, info); ok && prefix == ":" {
 				if id, ok := b.Y.(*ast.Ident); ok {
-					v := vars[id.Name]
+					v := vars[objectOf(info, id)]
 					if v.envName != "" {
 						lp.EnvName = v.envName
 						lp.DefaultPort = v.defaultPort
@@ -248,10 +262,24 @@ func stringConst(e ast.Expr, info *types.Info) (string, bool) {
 }
 func literalString(e ast.Expr, info *types.Info) (string, bool) { return stringConst(e, info) }
 
+func objectOf(info *types.Info, id *ast.Ident) types.Object {
+	if id == nil {
+		return nil
+	}
+	if object := info.Defs[id]; object != nil {
+		return object
+	}
+	return info.Uses[id]
+}
+
 func classify(file *ast.File, r assignedRead, info *types.Info, fset *token.FileSet, root string) (model.Requirement, []model.Evidence) {
-	if r.variable == "" { // Direct boolean feature flag comparison.
+	scope := ast.Node(file)
+	if r.function != nil && r.function.Body != nil {
+		scope = r.function.Body
+	}
+	if r.variable == nil { // Direct boolean feature flag comparison.
 		optional := false
-		ast.Inspect(file, func(n ast.Node) bool {
+		ast.Inspect(scope, func(n ast.Node) bool {
 			b, ok := n.(*ast.BinaryExpr)
 			if !ok || (b.Op != token.EQL && b.Op != token.NEQ) {
 				return true
@@ -274,124 +302,125 @@ func classify(file *ast.File, r assignedRead, info *types.Info, fset *token.File
 		}
 		return model.RequirementUnknown, nil
 	}
+	if r.function == nil || r.function.Body == nil {
+		return model.RequirementUnknown, nil
+	}
 	result := model.RequirementUnknown
 	var evidence []model.Evidence
-	ast.Inspect(file, func(n ast.Node) bool {
-		is, ok := n.(*ast.IfStmt)
+	for _, statement := range r.function.Body.List {
+		is, ok := statement.(*ast.IfStmt)
 		if !ok {
-			return true
+			continue
 		}
 		empty := conditionMatches(is.Cond, r.variable, r.okVariable, info)
 		if !empty {
-			return true
+			continue
 		}
 		loc := location(fset, is.Pos(), root)
 		if assignsNonEmpty(is.Body, r.variable, info) {
 			result = model.RequirementOptional
 			evidence = []model.Evidence{{Kind: "fallback", Description: "an empty value is replaced with a static fallback", Location: loc}}
-			return false
+			break
 		}
-		if terminates(is.Body, info) {
+		if definitelyTerminates(is.Body, info) {
 			result = model.RequirementRequired
 			evidence = []model.Evidence{{Kind: "termination", Description: "application initialization terminates when the value is absent", Location: loc}}
-			return false
+			break
 		}
 		if returnsError(is.Body, info) {
-			if fn := enclosingFunction(file, r.call); fn != nil && callerTerminatesOnError(file, fn.Name.Name, info) {
+			if r.function != nil && callerTerminatesOnError(file, objectOf(info, r.function.Name), info) {
 				result = model.RequirementRequired
 				evidence = []model.Evidence{{Kind: "propagated-error", Description: "the read returns an error that the application entrypoint handles by terminating", Location: loc}}
-				return false
+				break
 			}
 		}
-		return true
-	})
+	}
 	return result, evidence
 }
 
-func conditionMatches(e ast.Expr, v, okv string, info *types.Info) bool {
+func conditionMatches(e ast.Expr, variable, okVariable types.Object, info *types.Info) bool {
 	if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.NOT {
 		id, _ := u.X.(*ast.Ident)
-		return id != nil && id.Name == okv && okv != ""
+		return id != nil && okVariable != nil && objectOf(info, id) == okVariable
 	}
 	b, ok := e.(*ast.BinaryExpr)
 	if !ok || b.Op != token.EQL {
 		return false
 	}
-	id, _ := b.X.(*ast.Ident)
-	if id == nil || id.Name != v {
+	for _, pair := range [][2]ast.Expr{{b.X, b.Y}, {b.Y, b.X}} {
+		id, _ := pair[0].(*ast.Ident)
+		if id == nil || objectOf(info, id) != variable {
+			continue
+		}
+		s, yes := literalString(pair[1], info)
+		return yes && s == ""
+	}
+	return false
+}
+func assignsNonEmpty(block *ast.BlockStmt, variable types.Object, info *types.Info) bool {
+	if len(block.List) != 1 {
 		return false
 	}
-	s, yes := literalString(b.Y, info)
-	return yes && s == ""
+	assignment, ok := block.List[0].(*ast.AssignStmt)
+	if !ok {
+		return false
+	}
+	for index, lhs := range assignment.Lhs {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || objectOf(info, id) != variable || index >= len(assignment.Rhs) {
+			continue
+		}
+		value, constantValue := literalString(assignment.Rhs[index], info)
+		return constantValue && value != ""
+	}
+	return false
 }
-func assignsNonEmpty(b *ast.BlockStmt, v string, info *types.Info) bool {
-	found := false
-	ast.Inspect(b, func(n ast.Node) bool {
-		a, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, l := range a.Lhs {
-			if id, ok := l.(*ast.Ident); ok && id.Name == v && i < len(a.Rhs) {
-				s, yes := literalString(a.Rhs[i], info)
-				if yes && s != "" {
-					found = true
-				}
-			}
-		}
-		return true
-	})
-	return found
+func definitelyTerminates(block *ast.BlockStmt, info *types.Info) bool {
+	if len(block.List) != 1 {
+		return false
+	}
+	expression, ok := block.List[0].(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expression.X.(*ast.CallExpr)
+	return ok && isTerminatingCall(call, info)
 }
-func terminates(b *ast.BlockStmt, info *types.Info) bool {
-	found := false
-	ast.Inspect(b, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.ReturnStmt:
-			// A returned error is not necessarily fatal unless propagation to
-			// initialization is proven. Fleck deliberately leaves it unknown.
-			_ = x
-		case *ast.CallExpr:
-			switch f := x.Fun.(type) {
-			case *ast.Ident:
-				if builtin, ok := info.Uses[f].(*types.Builtin); ok && builtin.Name() == "panic" {
-					found = true
-				}
-			case *ast.SelectorExpr:
-				obj := info.Uses[f.Sel]
-				pkg := ""
-				if obj != nil && obj.Pkg() != nil {
-					pkg = obj.Pkg().Path()
-				}
-				if (pkg == "log" && (f.Sel.Name == "Fatal" || f.Sel.Name == "Fatalf" || f.Sel.Name == "Fatalln")) || (pkg == "os" && f.Sel.Name == "Exit") {
-					found = true
-				}
-			}
+
+func isTerminatingCall(call *ast.CallExpr, info *types.Info) bool {
+	switch function := call.Fun.(type) {
+	case *ast.Ident:
+		builtin, ok := info.Uses[function].(*types.Builtin)
+		return ok && builtin.Name() == "panic"
+	case *ast.SelectorExpr:
+		object := info.Uses[function.Sel]
+		if object == nil || object.Pkg() == nil {
+			return false
 		}
-		return !found
-	})
-	return found
+		path := object.Pkg().Path()
+		return (path == "log" && (function.Sel.Name == "Fatal" || function.Sel.Name == "Fatalf" || function.Sel.Name == "Fatalln")) || (path == "os" && function.Sel.Name == "Exit")
+	default:
+		return false
+	}
 }
 
 func returnsError(b *ast.BlockStmt, info *types.Info) bool {
-	found := false
-	ast.Inspect(b, func(n ast.Node) bool {
-		r, ok := n.(*ast.ReturnStmt)
-		if !ok {
+	if len(b.List) != 1 {
+		return false
+	}
+	returned, ok := b.List[0].(*ast.ReturnStmt)
+	if !ok {
+		return false
+	}
+	for _, result := range returned.Results {
+		if id, ok := result.(*ast.Ident); ok && id.Name == "nil" {
+			continue
+		}
+		if isErrorType(info.TypeOf(result)) {
 			return true
 		}
-		for _, result := range r.Results {
-			if id, ok := result.(*ast.Ident); ok && id.Name == "nil" {
-				continue
-			}
-			if isErrorType(info.TypeOf(result)) {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
+	}
+	return false
 }
 
 func enclosingFunction(file *ast.File, node ast.Node) *ast.FuncDecl {
@@ -404,17 +433,20 @@ func enclosingFunction(file *ast.File, node ast.Node) *ast.FuncDecl {
 	return nil
 }
 
-func callerTerminatesOnError(file *ast.File, functionName string, info *types.Info) bool {
+func callerTerminatesOnError(file *ast.File, function types.Object, info *types.Info) bool {
+	if function == nil {
+		return false
+	}
 	for _, decl := range file.Decls {
 		mainFn, ok := decl.(*ast.FuncDecl)
 		if !ok || mainFn.Name.Name != "main" || mainFn.Body == nil {
 			continue
 		}
-		errorVars := map[string]bool{}
-		ast.Inspect(mainFn.Body, func(n ast.Node) bool {
-			a, ok := n.(*ast.AssignStmt)
+		errorVars := map[types.Object]bool{}
+		for _, statement := range mainFn.Body.List {
+			a, ok := statement.(*ast.AssignStmt)
 			if !ok {
-				return true
+				continue
 			}
 			for _, rhs := range a.Rhs {
 				call, ok := rhs.(*ast.CallExpr)
@@ -422,7 +454,7 @@ func callerTerminatesOnError(file *ast.File, functionName string, info *types.In
 					continue
 				}
 				id, ok := call.Fun.(*ast.Ident)
-				if !ok || id.Name != functionName {
+				if !ok || objectOf(info, id) != function {
 					continue
 				}
 				sig, _ := info.TypeOf(call.Fun).(*types.Signature)
@@ -431,29 +463,19 @@ func callerTerminatesOnError(file *ast.File, functionName string, info *types.In
 						continue
 					}
 					if name, ok := lhs.(*ast.Ident); ok && name.Name != "_" {
-						errorVars[name.Name] = true
+						errorVars[objectOf(info, name)] = true
 					}
 				}
 			}
-			return true
-		})
-		proven := false
-		ast.Inspect(mainFn.Body, func(n ast.Node) bool {
-			if proven {
-				return false
+		}
+		for _, statement := range mainFn.Body.List {
+			is, ok := statement.(*ast.IfStmt)
+			if !ok || !conditionNonNilVariable(is.Cond, errorVars, info) {
+				continue
 			}
-			is, ok := n.(*ast.IfStmt)
-			if !ok || !conditionNonNilVariable(is.Cond, errorVars) {
+			if definitelyTerminates(is.Body, info) {
 				return true
 			}
-			if terminates(is.Body, info) {
-				proven = true
-				return false
-			}
-			return true
-		})
-		if proven {
-			return true
 		}
 	}
 	return false
@@ -467,37 +489,38 @@ func isErrorType(value types.Type) bool {
 	return types.Implements(value, errorType) || types.Implements(types.NewPointer(value), errorType)
 }
 
-func conditionNonNilVariable(expr ast.Expr, names map[string]bool) bool {
+func conditionNonNilVariable(expr ast.Expr, objects map[types.Object]bool, info *types.Info) bool {
 	b, ok := expr.(*ast.BinaryExpr)
 	if !ok || b.Op != token.NEQ {
 		return false
 	}
 	left, lok := b.X.(*ast.Ident)
 	right, rok := b.Y.(*ast.Ident)
-	return lok && rok && ((names[left.Name] && right.Name == "nil") || (names[right.Name] && left.Name == "nil"))
+	return lok && rok && ((objects[objectOf(info, left)] && right.Name == "nil") || (objects[objectOf(info, right)] && left.Name == "nil"))
 }
-func fallbackPort(file *ast.File, v string, info *types.Info) int {
+func fallbackPort(function *ast.FuncDecl, variable types.Object, info *types.Info) int {
+	if function == nil || function.Body == nil {
+		return 0
+	}
 	p := 0
-	ast.Inspect(file, func(n ast.Node) bool {
-		is, ok := n.(*ast.IfStmt)
-		if !ok || !conditionMatches(is.Cond, v, "", info) {
-			return true
+	for _, statement := range function.Body.List {
+		is, ok := statement.(*ast.IfStmt)
+		if !ok || !conditionMatches(is.Cond, variable, nil, info) || len(is.Body.List) != 1 {
+			continue
 		}
-		ast.Inspect(is.Body, func(n ast.Node) bool {
-			a, ok := n.(*ast.AssignStmt)
+		for _, bodyStatement := range is.Body.List {
+			a, ok := bodyStatement.(*ast.AssignStmt)
 			if !ok {
-				return true
+				continue
 			}
 			for i, l := range a.Lhs {
-				if id, ok := l.(*ast.Ident); ok && id.Name == v && i < len(a.Rhs) {
+				if id, ok := l.(*ast.Ident); ok && objectOf(info, id) == variable && i < len(a.Rhs) {
 					s, _ := literalString(a.Rhs[i], info)
 					p, _ = strconv.Atoi(s)
 				}
 			}
-			return true
-		})
-		return true
-	})
+		}
+	}
 	return p
 }
 func parseAddress(s string) (int, bool) {

@@ -14,6 +14,13 @@ import (
 )
 
 func Extract(path, containerID string) (model.DockerFacts, error) {
+	return ExtractWithSource(path, path, containerID)
+}
+
+// ExtractWithSource reads path while recording sourcePath in reported
+// locations. Keeping these separate lets callers analyze an absolute path but
+// present a stable path relative to the Fleck workspace.
+func ExtractWithSource(path, sourcePath, containerID string) (model.DockerFacts, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return model.DockerFacts{}, fmt.Errorf("open Dockerfile: %w", err)
@@ -59,7 +66,7 @@ func Extract(path, containerID string) (model.DockerFacts, error) {
 			}
 		}
 	}
-	var facts model.DockerFacts
+	facts := model.DockerFacts{Location: model.SourceLocation{File: sourcePath}}
 	for _, i := range order {
 		for _, raw := range stages[i].Commands {
 			switch c := raw.(type) {
@@ -70,11 +77,15 @@ func Extract(path, containerID string) (model.DockerFacts, error) {
 					}
 				}
 			case *instructions.EnvCommand:
+				location := commandLocation(c, sourcePath)
 				for _, pair := range c.Env {
 					v, known := expand(pair.Value, env, args)
-					env[pair.Key] = model.EnvSupply{Name: pair.Key, Value: v, ValueKnown: known, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile, Container: containerID, Location: model.SourceLocation{File: "Dockerfile"}}
+					env[pair.Key] = model.EnvSupply{Name: pair.Key, Value: v, ValueKnown: known, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile, Container: containerID, Location: location}
 				}
 			case *instructions.ExposeCommand:
+				if facts.Location.Line == 0 {
+					facts.Location = commandLocation(c, sourcePath)
+				}
 				for _, p := range c.Ports {
 					n, _ := strconv.Atoi(strings.Split(p, "/")[0])
 					if n > 0 {
@@ -100,6 +111,16 @@ func Extract(path, containerID string) (model.DockerFacts, error) {
 	}
 	sort.Ints(facts.ExposedPorts)
 	return facts, nil
+}
+
+func commandLocation(command instructions.Command, sourcePath string) model.SourceLocation {
+	location := model.SourceLocation{File: sourcePath}
+	ranges := command.Location()
+	if len(ranges) > 0 {
+		location.Line = ranges[0].Start.Line
+		location.Column = ranges[0].Start.Character
+	}
+	return location
 }
 
 func expand(v string, env map[string]model.EnvSupply, args map[string]string) (string, bool) {

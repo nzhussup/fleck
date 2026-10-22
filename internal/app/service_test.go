@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/nzhussup/fleck/internal/model"
 )
 
 func TestAnalyzeSupportsEveryInputLayerCombination(t *testing.T) {
@@ -47,11 +49,11 @@ spec:
 		application, deployment, dockerfile bool
 		wantSkipped                         int
 	}{
-		{name: "application", sections: application, application: true, wantSkipped: 5},
+		{name: "application", sections: application, application: true, wantSkipped: 6},
 		{name: "deployment", sections: deployment, deployment: true, wantSkipped: 4},
-		{name: "Dockerfile", sections: dockerfile, dockerfile: true, wantSkipped: 5},
+		{name: "Dockerfile", sections: dockerfile, dockerfile: true, wantSkipped: 6},
 		{name: "application and deployment", sections: application + deployment, application: true, deployment: true},
-		{name: "application and Dockerfile", sections: application + dockerfile, application: true, dockerfile: true, wantSkipped: 3},
+		{name: "application and Dockerfile", sections: application + dockerfile, application: true, dockerfile: true, wantSkipped: 4},
 		{name: "deployment and Dockerfile", sections: deployment + dockerfile, deployment: true, dockerfile: true, wantSkipped: 4},
 		{name: "all layers", sections: application + deployment + dockerfile, application: true, deployment: true, dockerfile: true},
 	}
@@ -73,6 +75,38 @@ spec:
 				t.Fatalf("skipped=%d, want %d: %#v", len(result.Skipped), test.wantSkipped, result.Skipped)
 			}
 		})
+	}
+}
+
+func TestResolveListenPortsUsesEffectiveEnvironmentWithoutUnsafeFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		supplies []model.EnvSupply
+		port     int
+		resolved bool
+	}{
+		{name: "absent uses application fallback", port: 8080, resolved: true},
+		{name: "Docker value", supplies: []model.EnvSupply{{Name: "PORT", Value: "3000", ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile}}, port: 3000, resolved: true},
+		{name: "Kubernetes override", supplies: []model.EnvSupply{{Name: "PORT", Value: "3000", ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile}, {Name: "PORT", Value: "9090", ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyKubernetes}}, port: 9090, resolved: true},
+		{name: "unverified override blocks Docker and fallback", supplies: []model.EnvSupply{{Name: "PORT", Value: "3000", ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile}, {Name: "PORT", State: model.SupplyUnverified, SourceKind: model.SupplyConfigMap}}},
+		{name: "invalid override blocks Docker and fallback", supplies: []model.EnvSupply{{Name: "PORT", Value: "3000", ValueKnown: true, State: model.SupplyDefinite, SourceKind: model.SupplyDockerfile}, {Name: "PORT", State: model.SupplyMissingMandatory, SourceKind: model.SupplyConfigMap}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts := &model.Facts{ListenPorts: []model.ListenPort{{EnvName: "PORT", DefaultPort: 8080}}, Container: model.Container{Supplies: test.supplies}}
+			resolveListenPorts(facts)
+			if facts.ListenPorts[0].Port != test.port || facts.ListenPorts[0].Resolved != test.resolved {
+				t.Fatalf("listener=%#v", facts.ListenPorts[0])
+			}
+		})
+	}
+}
+
+func TestSourcePathIsRelativeToFleckWorkspace(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "workspace")
+	path := filepath.Join(root, "application-repo", "build", "Dockerfile.api")
+	if got, want := sourcePath(root, path), "application-repo/build/Dockerfile.api"; got != want {
+		t.Fatalf("sourcePath()=%q, want %q", got, want)
 	}
 }
 
